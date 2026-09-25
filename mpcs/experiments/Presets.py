@@ -101,10 +101,6 @@ def dataset_preset(name: str, *, output_root: Path) -> ExperimentConfig:
             start_time_s=9 * 3600,
             end_time_s=11 * 3600,
         ),
-        federated=replace(
-            base.federated,
-            participant_platform_ids=tuple(f"P{i}" for i in range(1, count + 1)),
-        ),
     )
     config.validate()
     return config

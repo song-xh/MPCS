@@ -1555,17 +1555,6 @@ class ExperimentConfig:
             raise ValueError(
                 "parcel.fare_normalization_scale must cover parcel-v2 fares"
             )
-        if self.federated.participant_platform_ids != self.platform_ids:
-            raise ValueError("federated participant set must match platform IDs")
-        if (
-            self.federated.enabled
-            != self.flta_mode.federation_enabled
-            or self.federated.secure_aggregation_enabled
-            != self.flta_mode.secure_aggregation_enabled
-        ):
-            raise ValueError(
-                "federated flags must match the selected FLTA mode"
-            )
 
     def derive_seed(
         self,
