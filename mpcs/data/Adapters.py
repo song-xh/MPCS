@@ -7,9 +7,8 @@ simulation clock.
 from __future__ import annotations
 from dataclasses import asdict, replace
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import nullcontext
-from hashlib import sha256
 import json
 import random
 from pathlib import Path
@@ -18,7 +17,7 @@ from typing import Protocol
 import networkx as nx
 
 from mpcs.config import DatasetSplit, ExperimentConfig
-from mpcs.core.Domain import Station
+from mpcs.core.Domain import Parcel, ParcelType, Station, VehicleSnapshot
 from mpcs.core.Framework import (
     PreparedEnvironment,
     PreparedEnvironmentSplits,
@@ -39,6 +38,11 @@ from mpcs.core.GraphUtils import (
 from mpcs.core.TaskUtils import (
     CanonicalOrder,
     CanonicalOrderPool,
+    ManifestEntry,
+    PartitionManifest,
+    PlatformSourceSelection,
+    PlatformTaskDataset,
+    TaskPartition,
     TaskPartitioner,
     load_platform_order_split,
     load_platform_order_splits,
@@ -65,6 +69,94 @@ class EnvironmentPreparationAdapter(Protocol):
         road_artifact_dir: Path | None,
         stage_reporter: object | None,
     ) -> PreparedEnvironment: ...
+
+
+def prepare_scenario(
+    config: ExperimentConfig,
+    split: DatasetSplit,
+    *,
+    road_network: RoadNetwork,
+    region_index: RegionIndex,
+    station_index: StationIndex,
+    parcels_by_platform: Mapping[str, Iterable[Parcel]],
+    vehicles_by_platform: Mapping[str, Iterable[VehicleSnapshot]],
+    source_identity: str | None = None,
+) -> PreparedEnvironment:
+    """Turn domain tasks and fleets from an external adapter into a scenario."""
+    config.validate()
+    identity = config.dataset.name if source_identity is None else source_identity
+    if not identity:
+        raise ValueError("source identity must be non-empty")
+    if set(parcels_by_platform) != set(config.platform_ids):
+        raise ValueError("parcel platforms differ from configured platforms")
+    datasets: dict[str, PlatformTaskDataset] = {}
+    entries: list[ManifestEntry] = []
+    for platform_id in config.platform_ids:
+        parcels = tuple(parcels_by_platform[platform_id])
+        datasets[platform_id] = PlatformTaskDataset(
+            platform_id=platform_id,
+            pickup_parcels=tuple(
+                parcel for parcel in parcels if parcel.parcel_type is ParcelType.PICKUP
+            ),
+            dropoff_parcels=tuple(
+                parcel for parcel in parcels if parcel.parcel_type is ParcelType.DROPOFF
+            ),
+        )
+        entries.extend(
+            ManifestEntry(
+                canonical_order_id=parcel.parcel_id,
+                source_partition=identity,
+                raw_order_id=parcel.parcel_id,
+                origin_platform_id=platform_id,
+                parcel_type=parcel.parcel_type,
+                arrival_time_s=parcel.arrival_time_s,
+                road_node_id=parcel.road_node_id,
+                location=parcel.location,
+                region_id=parcel.region_id,
+                dispatch_station_id=parcel.dispatch_station_id,
+                fare_amount=parcel.fare_amount,
+                capacity_units=parcel.capacity_units,
+            )
+            for parcel in parcels
+        )
+    partition_seed = _partition_seed_for_split(config, split)
+    partition = TaskPartition(
+        manifest=PartitionManifest(
+            dataset_name=config.dataset.name,
+            master_seed=partition_seed,
+            platform_ids=config.platform_ids,
+            source_selections=tuple(
+                PlatformSourceSelection(platform_id=platform_id, source_ids=(identity,))
+                for platform_id in config.platform_ids
+            ),
+            entries=tuple(entries),
+        ),
+        datasets=datasets,
+    )
+    parcel_ids = tuple(sorted(entry.canonical_order_id for entry in entries))
+    return PreparedEnvironment(
+        dataset_split=split,
+        source_audit=PreparedSourceAudit(
+            split=split,
+            source_ids=(identity,),
+            canonical_order_ids=parcel_ids,
+            semantic_order_ids=parcel_ids,
+            source_identity=identity,
+        ),
+        partition_seed=partition_seed,
+        fleet_seeds_by_platform=_fleet_seeds_for_split(config=config, split=split),
+        road_network=road_network,
+        region_index=region_index,
+        station_index=station_index,
+        task_partition=partition,
+        initial_vehicles={
+            platform_id: tuple(vehicles_by_platform[platform_id])
+            for platform_id in config.platform_ids
+        },
+        adapter_name="external",
+        adapter_version=config.dataset.schema_name,
+        adapter_identity=identity,
+    )
 
 
 class ParcelV2PreparationAdapter:
@@ -579,10 +671,6 @@ def _prepare_pools(
     with _stage(stage_reporter, "split_build"):
         if frozenset(pools) != frozenset(DatasetSplit):
             raise ValueError("adapter must build every data split")
-    adapter_fingerprint = _adapter_input_fingerprint(
-        config=config,
-        adapter=adapter,
-    )
     prepared: dict[DatasetSplit, PreparedEnvironment] = {}
     for split in DatasetSplit:
         platform_pools = dict(pools[split])
@@ -599,7 +687,6 @@ def _prepare_pools(
             platform_pools=platform_pools,
             adapter=adapter,
             stage_reporter=stage_reporter,
-            adapter_fingerprint=adapter_fingerprint,
         )
     return PreparedEnvironmentSplits(by_split=prepared)
 
@@ -614,7 +701,7 @@ def _prepare_one_split(
     platform_pools: Mapping[str, CanonicalOrderPool],
     adapter: EnvironmentPreparationAdapter,
     stage_reporter: object | None,
-    adapter_fingerprint: str | None = None,
+    adapter_identity: str | None = None,
     initial_vehicles_override: Mapping[str, tuple[object, ...]] | None = None,
 ) -> PreparedEnvironment:
     if not isinstance(split, DatasetSplit):
@@ -675,10 +762,10 @@ def _prepare_one_split(
         initial_vehicles=vehicles,
         adapter_name=adapter.name,
         adapter_version=adapter.version,
-        adapter_input_fingerprint=(
-            _adapter_input_fingerprint(config=config, adapter=adapter)
-            if adapter_fingerprint is None
-            else adapter_fingerprint
+        adapter_identity=(
+            f"{adapter.name}:{adapter.version}"
+            if adapter_identity is None
+            else adapter_identity
         ),
     )
 
@@ -961,7 +1048,7 @@ def _prepare_from_canonical_context(
             platform_pools=platform_pools,
             adapter=adapter,
             stage_reporter=stage_reporter,
-            adapter_fingerprint=context.fingerprint,
+            adapter_identity=context.fingerprint,
             initial_vehicles_override=selected_vehicles,
         )
         return replace(
@@ -1101,25 +1188,6 @@ def _validate_index_sizes(
         raise ValueError(
             "loaded Station count differs from configuration"
         )
-
-
-def _adapter_input_fingerprint(
-    *,
-    config: ExperimentConfig,
-    adapter: EnvironmentPreparationAdapter,
-) -> str:
-    payload = {
-        "adapter": adapter.name,
-        "version": adapter.version,
-        "config_fingerprint": config.snapshot_fingerprint(),
-    }
-    return sha256(
-        json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
 
 
 def _stage(

@@ -51,4 +51,23 @@ results = ExperimentRunner(registry).run(
 
 The returned scenario contains a road network, region and station indexes, a platform task partition, and initial vehicles. The runner owns and closes that road network after the comparison. `Environment.from_components` is available when constructing a simulation directly from custom task datasets and vehicles.
 
-Custom parsers should produce the same canonical task and road contracts. Dataset identity, split membership, and coordinate conversion belong in the provider; route execution and settlement remain in the core. Keep source data and generated maps under `dataset/` so they stay local.
+For an existing Chengdu or Shanghai parcel-v2 format, select a config and supply the local paths. For a new format, set `dataset.adapter="external"` and give the dataset a `schema_name`. Source file mappings for the three built-in splits are then unnecessary. The provider reads its source and calls `mpcs.data.prepare_scenario` with the road, region and station indexes, parcels, and initial vehicles by platform. The function constructs the internal partition and audit records:
+
+```python
+from mpcs.data import prepare_scenario
+
+def my_scenario_provider(config, split):
+    road, regions, stations = load_my_map(config, split)
+    parcels, vehicles = load_my_tasks_and_fleet(config, split)
+    return prepare_scenario(
+        config, split,
+        road_network=road,
+        region_index=regions,
+        station_index=stations,
+        parcels_by_platform=parcels,
+        vehicles_by_platform=vehicles,
+        source_identity="my-data/v1",
+    )
+```
+
+Each `parcels_by_platform` value is an iterable of `Parcel`; each fleet value is an iterable of `VehicleSnapshot`. The provider owns parsing, split selection, and coordinate conversion. Keep source data and generated maps under `dataset/` so they stay local.

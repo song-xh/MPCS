@@ -286,7 +286,7 @@ class PreparedSourceAudit:
     source_ids: tuple[str, ...]
     canonical_order_ids: tuple[str, ...]
     semantic_order_ids: tuple[str, ...]
-    pool_fingerprint: str
+    source_identity: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.split, DatasetSplit):
@@ -307,10 +307,8 @@ class PreparedSourceAudit:
                     f"source audit {name} must be sorted and unique"
                 )
             object.__setattr__(self, name, values)
-        _require_sha256(
-            "source audit pool_fingerprint",
-            self.pool_fingerprint,
-        )
+        if not self.source_identity:
+            raise ValueError("source audit identity must be non-empty")
 
     @classmethod
     def from_pool(
@@ -322,7 +320,7 @@ class PreparedSourceAudit:
             source_ids=pool.source_ids,
             canonical_order_ids=pool.canonical_order_ids,
             semantic_order_ids=pool.semantic_order_ids,
-            pool_fingerprint=pool.fingerprint,
+            source_identity=pool.fingerprint,
         )
 
 
@@ -341,7 +339,7 @@ class PreparedEnvironment:
     initial_vehicles: Mapping[str, tuple[VehicleSnapshot, ...]]
     adapter_name: str = "parcel_v2"
     adapter_version: str = "chengdu-v1"
-    adapter_input_fingerprint: str = "0" * 64
+    adapter_identity: str = "unspecified"
 
     def __post_init__(self) -> None:
         if not isinstance(self.dataset_split, DatasetSplit):
@@ -350,10 +348,8 @@ class PreparedEnvironment:
             raise ValueError("prepared source audit role differs")
         if not self.adapter_name or not self.adapter_version:
             raise ValueError("prepared adapter identity must be non-empty")
-        _require_sha256(
-            "prepared adapter input fingerprint",
-            self.adapter_input_fingerprint,
-        )
+        if not self.adapter_identity:
+            raise ValueError("prepared adapter identity must be non-empty")
         if type(self.partition_seed) is not int or self.partition_seed < 0:
             raise ValueError("prepared partition seed must be non-negative")
         platform_ids = self.task_partition.manifest.platform_ids
@@ -425,8 +421,8 @@ class PreparedEnvironment:
         return _canonical_fingerprint(
             {
                 "dataset_split": self.dataset_split.value,
-                "source_pool_fingerprint": (
-                    self.source_audit.pool_fingerprint
+                "source_identity": (
+                    self.source_audit.source_identity
                 ),
                 "partition_seed": self.partition_seed,
                 "partition_fingerprint": (
@@ -435,8 +431,8 @@ class PreparedEnvironment:
                 "fleet_fingerprint": self.fleet_fingerprint,
                 "adapter_name": self.adapter_name,
                 "adapter_version": self.adapter_version,
-                "adapter_input_fingerprint": (
-                    self.adapter_input_fingerprint
+                "adapter_identity": (
+                    self.adapter_identity
                 ),
             }
         )
@@ -551,7 +547,7 @@ class PreparedEnvironmentSplits:
                 "source_record_count": len(
                     audit.canonical_order_ids
                 ),
-                "source_pool_fingerprint": audit.pool_fingerprint,
+                "source_identity": audit.source_identity,
                 "canonical_order_ids_fingerprint": (
                     _canonical_fingerprint(
                         list(audit.canonical_order_ids)
@@ -580,7 +576,7 @@ class PreparedEnvironmentSplits:
                     "name": prepared.adapter_name,
                     "version": prepared.adapter_version,
                     "input_fingerprint": (
-                        prepared.adapter_input_fingerprint
+                        prepared.adapter_identity
                     ),
                 },
             }

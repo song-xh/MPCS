@@ -270,12 +270,8 @@ class DatasetConfig:
 
     name: str = arguments.DATASET_NAME
     # Road parser and coordinate transform are selected by the data profile.
-    adapter: Literal["parcel_v2", "synthetic"] = arguments.DATASET_ADAPTER
-    schema_name: Literal[
-        "didi_chengdu_parcel_v2",
-        "lade_shanghai_parcel_v2",
-        "synthetic_order_v1",
-    ] = arguments.DATASET_SCHEMA_NAME
+    adapter: Literal["parcel_v2", "synthetic", "external"] = arguments.DATASET_ADAPTER
+    schema_name: str = arguments.DATASET_SCHEMA_NAME
     train_source_files: tuple[str, ...] = arguments.TRAIN_SOURCE_FILES
     validation_source_files: tuple[str, ...] = arguments.VALIDATION_SOURCE_FILES
     test_source_files: tuple[str, ...] = arguments.TEST_SOURCE_FILES
@@ -317,119 +313,124 @@ class DatasetConfig:
     def validate(self) -> None:
         if not self.name:
             raise ValueError("dataset name must be non-empty")
-        source_files_by_split = {
-            split: self.source_files_for(split)
-            for split in DatasetSplit
-        }
-        seen_source_files: set[str] = set()
-        for split, source_files in source_files_by_split.items():
-            if type(source_files) is not tuple or not source_files:
-                raise ValueError(
-                    f"dataset {split.value} source files must be a non-empty tuple"
-                )
-            for source_file in source_files:
-                if (
-                    type(source_file) is not str
-                    or not source_file
-                    or source_file in {".", ".."}
-                    or "/" in source_file
-                    or "\\" in source_file
-                    or "\x00" in source_file
-                    or Path(source_file).name != source_file
-                ):
+        if not self.schema_name:
+            raise ValueError("dataset schema name must be non-empty")
+        if self.adapter not in {"parcel_v2", "synthetic", "external"}:
+            raise ValueError(f"unknown dataset adapter: {self.adapter}")
+        if self.adapter != "external":
+            source_files_by_split = {
+                split: self.source_files_for(split)
+                for split in DatasetSplit
+            }
+            seen_source_files: set[str] = set()
+            for split, source_files in source_files_by_split.items():
+                if type(source_files) is not tuple or not source_files:
                     raise ValueError(
-                        "dataset split source files must be safe basenames"
+                        f"dataset {split.value} source files must be a non-empty tuple"
                     )
-            if len(set(source_files)) != len(source_files):
-                raise ValueError(
-                    f"dataset {split.value} source files must be unique"
-                )
-            overlap = seen_source_files.intersection(source_files)
-            if overlap:
-                raise ValueError(
-                    "dataset split source files must be mutually exclusive"
-                )
-            seen_source_files.update(source_files)
-        if type(self.platform_source_files) is not tuple:
-            raise ValueError("platform source files must be a tuple")
-        platform_ids: list[str] = []
-        # A source file may intentionally be shared by platforms in the same
-        # modulo group (for example P1/P5/P9/P13).  Split ownership remains
-        # disjoint; platform-level exclusivity is enforced while loading the
-        # shared stream rather than by rejecting the manifest here.
-        mapped_sources_by_split: dict[DatasetSplit, set[str]] = {
-            split: set() for split in DatasetSplit
-        }
-        for mapping in self.platform_source_files:
-            if not isinstance(mapping, PlatformSourceFiles):
-                raise ValueError(
-                    "platform source files must contain PlatformSourceFiles"
-                )
-            if not mapping.platform_id:
-                raise ValueError("platform source mapping ID must be non-empty")
-            platform_ids.append(mapping.platform_id)
-            for split in DatasetSplit:
-                mapped_source_files = mapping.source_files_for(split)
-                if (
-                    type(mapped_source_files) is not tuple
-                    or not mapped_source_files
-                ):
-                    raise ValueError(
-                        "each platform split source mapping must be a non-empty tuple"
-                    )
-                for source_file in mapped_source_files:
-                    if source_file not in source_files_by_split[split]:
+                for source_file in source_files:
+                    if (
+                        type(source_file) is not str
+                        or not source_file
+                        or source_file in {".", ".."}
+                        or "/" in source_file
+                        or "\\" in source_file
+                        or "\x00" in source_file
+                        or Path(source_file).name != source_file
+                    ):
                         raise ValueError(
-                            "platform source mapping references a file outside "
-                            f"the {split.value} split: {source_file}"
+                            "dataset split source files must be safe basenames"
                         )
-                    mapped_sources_by_split[split].add(source_file)
-        if len(set(platform_ids)) != len(platform_ids):
-            raise ValueError("platform source mapping platform IDs must be unique")
-        for split in DatasetSplit:
-            mapped_source_files = mapped_sources_by_split[split]
-            expected_source_files = set(source_files_by_split[split])
-            if mapped_source_files != expected_source_files:
+                if len(set(source_files)) != len(source_files):
+                    raise ValueError(
+                        f"dataset {split.value} source files must be unique"
+                    )
+                overlap = seen_source_files.intersection(source_files)
+                if overlap:
+                    raise ValueError(
+                        "dataset split source files must be mutually exclusive"
+                    )
+                seen_source_files.update(source_files)
+            if type(self.platform_source_files) is not tuple:
+                raise ValueError("platform source files must be a tuple")
+            platform_ids: list[str] = []
+            # A source file may intentionally be shared by platforms in the same
+            # modulo group (for example P1/P5/P9/P13).  Split ownership remains
+            # disjoint; platform-level exclusivity is enforced while loading the
+            # shared stream rather than by rejecting the manifest here.
+            mapped_sources_by_split: dict[DatasetSplit, set[str]] = {
+                split: set() for split in DatasetSplit
+            }
+            for mapping in self.platform_source_files:
+                if not isinstance(mapping, PlatformSourceFiles):
+                    raise ValueError(
+                        "platform source files must contain PlatformSourceFiles"
+                    )
+                if not mapping.platform_id:
+                    raise ValueError("platform source mapping ID must be non-empty")
+                platform_ids.append(mapping.platform_id)
+                for split in DatasetSplit:
+                    mapped_source_files = mapping.source_files_for(split)
+                    if (
+                        type(mapped_source_files) is not tuple
+                        or not mapped_source_files
+                    ):
+                        raise ValueError(
+                            "each platform split source mapping must be a non-empty tuple"
+                        )
+                    for source_file in mapped_source_files:
+                        if source_file not in source_files_by_split[split]:
+                            raise ValueError(
+                                "platform source mapping references a file outside "
+                                f"the {split.value} split: {source_file}"
+                            )
+                        mapped_sources_by_split[split].add(source_file)
+            if len(set(platform_ids)) != len(platform_ids):
+                raise ValueError("platform source mapping platform IDs must be unique")
+            for split in DatasetSplit:
+                mapped_source_files = mapped_sources_by_split[split]
+                expected_source_files = set(source_files_by_split[split])
+                if mapped_source_files != expected_source_files:
+                    raise ValueError(
+                        "platform source mapping must cover the complete "
+                        f"{split.value} split exactly"
+                    )
+            if (
+                self.adapter,
+                self.schema_name,
+            ) not in {
+                ("parcel_v2", "didi_chengdu_parcel_v2"),
+                ("parcel_v2", "lade_shanghai_parcel_v2"),
+                ("synthetic", "synthetic_order_v1"),
+            }:
                 raise ValueError(
-                    "platform source mapping must cover the complete "
-                    f"{split.value} split exactly"
+                    "dataset adapter and schema are incompatible"
                 )
-        if (
-            self.adapter,
-            self.schema_name,
-        ) not in {
-            ("parcel_v2", "didi_chengdu_parcel_v2"),
-            ("parcel_v2", "lade_shanghai_parcel_v2"),
-            ("synthetic", "synthetic_order_v1"),
-        }:
-            raise ValueError(
-                "dataset adapter and schema are incompatible"
-            )
-        expected_coordinate_contract = {
-            "didi_chengdu_parcel_v2": (
-                "GCJ-02",
-                "EPSG:4326",
-                "gcj02_to_wgs84",
-                "legacy-chengdu-v1",
-            ),
-            "lade_shanghai_parcel_v2": (
-                "EPSG:4326",
-                "EPSG:4326",
-                "identity",
-                "osm-shanghai-v1",
-            ),
-        }
-        if (
-            self.adapter == "parcel_v2"
-            and self.schema_name in expected_coordinate_contract
-            and (
-                self.source_crs,
-                self.graph_crs,
-                self.coordinate_transform,
-                self.road_parser,
-            ) != expected_coordinate_contract[self.schema_name]
-        ):
-            raise ValueError("unsupported dataset coordinate transform")
+            expected_coordinate_contract = {
+                "didi_chengdu_parcel_v2": (
+                    "GCJ-02",
+                    "EPSG:4326",
+                    "gcj02_to_wgs84",
+                    "legacy-chengdu-v1",
+                ),
+                "lade_shanghai_parcel_v2": (
+                    "EPSG:4326",
+                    "EPSG:4326",
+                    "identity",
+                    "osm-shanghai-v1",
+                ),
+            }
+            if (
+                self.adapter == "parcel_v2"
+                and self.schema_name in expected_coordinate_contract
+                and (
+                    self.source_crs,
+                    self.graph_crs,
+                    self.coordinate_transform,
+                    self.road_parser,
+                ) != expected_coordinate_contract[self.schema_name]
+            ):
+                raise ValueError("unsupported dataset coordinate transform")
         _require_positive(
             "dataset.max_map_match_distance_m",
             self.max_map_match_distance_m,
@@ -1525,15 +1526,16 @@ class ExperimentConfig:
                 f"{sorted(unknown_fleet_platforms)}"
             )
         for platform_id in self.platform_ids:
-            try:
-                self.dataset.source_files_for_platform(
-                    platform_id,
-                    DatasetSplit.TRAIN,
-                )
-            except KeyError as error:
-                raise ValueError(
-                    f"configured platform ID has no source mapping: {platform_id}"
-                ) from error
+            if self.dataset.adapter != "external":
+                try:
+                    self.dataset.source_files_for_platform(
+                        platform_id,
+                        DatasetSplit.TRAIN,
+                    )
+                except KeyError as error:
+                    raise ValueError(
+                        f"configured platform ID has no source mapping: {platform_id}"
+                    ) from error
             try:
                 self.dataset.quota_for_platform(platform_id)
             except KeyError as error:
