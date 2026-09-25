@@ -30,7 +30,7 @@ Modules are named for cohesive responsibilities. A small helper stays with the m
 
 Preparation adapters produce an immutable scenario with a road network, task partitions, station index, and initial fleet for a named split. Each algorithm creates its own mutable simulation from that scenario and receives the same initial state for comparisons. An algorithm provides platform action batches and any local matching or cross-platform bidding services required by its policy. The experiment runner records one common metric and progress schema regardless of method.
 
-PPO training consumes physical-frame observations and settlement rewards. Its state encoder and training adapter preserve sequential parcel decisions, legal-action masks, a single recorded reward per physical frame, and rollout updates. Federated aggregation is outside the independent PPO algorithm.
+PPO training consumes physical-frame observations and settlement rewards. Its state encoder and training adapter preserve sequential parcel decisions, legal-action masks, a single recorded reward per physical frame, and rollout updates. Each episode selects one platform for learning; other platform policies act with frozen weights. A checkpoint supplies a frozen PPO session to the common experiment runner through the optional frame hooks.
 
 ## Performance and observability
 

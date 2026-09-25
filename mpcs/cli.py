@@ -19,7 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("algorithms", help="List registered built-in algorithms")
-    for command in ("run", "sweep"):
+    for command in ("run", "sweep", "train-ppo"):
         sub = commands.add_parser(command)
         source = sub.add_mutually_exclusive_group()
         source.add_argument(
@@ -28,17 +28,23 @@ def build_parser() -> argparse.ArgumentParser:
             default="synthetic",
         )
         source.add_argument("--config", type=Path)
+        sub.add_argument("--output", type=Path, required=True)
+        sub.add_argument("--tensorboard", action="store_true")
+        sub.add_argument("--no-progress", action="store_true")
+        if command == "train-ppo":
+            sub.add_argument("--episodes", type=int)
+            sub.add_argument("--seed", type=int)
+            sub.add_argument("--device", default="cpu")
+            continue
         sub.add_argument("--methods", nargs="+", default=["localsum", "rl-capa"])
         sub.add_argument(
             "--split",
             choices=tuple(item.value for item in DatasetSplit),
             default="test",
         )
-        sub.add_argument("--output", type=Path, required=True)
-        sub.add_argument("--tensorboard", action="store_true")
-        sub.add_argument("--no-progress", action="store_true")
         if command == "run":
             sub.add_argument("--seed", type=int)
+            sub.add_argument("--ppo-checkpoint", type=Path)
         else:
             sub.add_argument("--seeds", nargs="+", type=int, required=True)
             sub.add_argument("--max-workers", type=int, default=2)
@@ -56,11 +62,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.config is None
         else load_experiment_config(args.config).config
     )
+    if args.command == "train-ppo":
+        from mpcs.algorithms.PPOTraining import PPOTrainer
+
+        if config.dataset.name.startswith("shanghai"):
+            raise ValueError("bundled Shanghai parcels are available for the test split")
+        records = PPOTrainer(config, device=args.device).train(
+            episodes=(
+                max(config.training.total_episodes, len(config.platform_ids))
+                if args.episodes is None
+                else args.episodes
+            ),
+            output_dir=args.output,
+            seed=args.seed,
+            tensorboard=args.tensorboard,
+            show_progress=not args.no_progress,
+        )
+        print(json.dumps(records[-1], indent=2, sort_keys=True))
+        return 0
     split = DatasetSplit(args.split)
     if config.dataset.name.startswith("shanghai") and split is not DatasetSplit.TEST:
         raise ValueError("bundled Shanghai parcels are available for the test split")
     if args.command == "run":
-        result = ExperimentRunner().run(
+        registry = builtin_algorithms()
+        if args.ppo_checkpoint is not None:
+            from mpcs.algorithms.PPOTraining import ppo_checkpoint_factory
+
+            registry.register("ppo", ppo_checkpoint_factory(args.ppo_checkpoint))
+        result = ExperimentRunner(registry).run(
             config,
             methods=args.methods,
             split=split,

@@ -8,6 +8,8 @@ Register an algorithm factory with `AlgorithmRegistry.register(name, factory)`. 
 - `decide(platform_id, observation, config)` returns one `PlatformActionBatch` for the current frame. The runner asks every platform for an action before calling `Environment.step` once.
 - `batch_processing_time_s_by_platform` maps platform IDs to current policy and matching time for reporting.
 
+Stateful evaluation policies may additionally implement `start_episode()`, `begin_frame(observations)`, `end_frame(observations, actions, result)`, and `finish_episode()`. The runner invokes these hooks once per physical frame, around the common `Environment.step` call. The bundled PPO checkpoint session uses them to maintain its sequential observation state.
+
 ```python
 from mpcs.experiments import ExperimentRunner, builtin_algorithms
 
@@ -22,6 +24,16 @@ results = ExperimentRunner(registry).run(
 ```
 
 The runner forks the prepared road runtime for each algorithm, including its shortest-path caches. Methods receive identical task partitions and initial fleets. The environment alone validates actions, advances physical time, commits assignments, and accounts for profit.
+
+To compare a trained PPO checkpoint through the same registry:
+
+```python
+from mpcs.algorithms.PPOTraining import ppo_checkpoint_factory
+
+registry.register("ppo", ppo_checkpoint_factory(checkpoint_path))
+```
+
+`PPOTrainer(config).train(episodes=..., output_dir=...)` saves per-platform policy and optimizer state at episode boundaries. `load_checkpoint(path)` restores it, and `evaluate(split=..., output_dir=...)` runs one deterministic episode. PPO actions are chosen sequentially within each physical frame; the trainer records one realized reward per platform per frame and updates only the selected platform's policy.
 
 ## Scenario provider
 

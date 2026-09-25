@@ -12,6 +12,9 @@ Python 3.11 or later is required. From the repository root:
 python -m pip install -e ".[dev]"
 python -m mpcs algorithms
 python -m mpcs run --dataset synthetic --methods localsum rl-capa --output output/example
+python -m mpcs train-ppo --dataset synthetic --output output/ppo --tensorboard
+python -m mpcs run --dataset synthetic --methods localsum ppo `
+  --ppo-checkpoint output/ppo/checkpoints/episode-000002.pt --output output/ppo-compare
 ```
 
 The synthetic preset needs no external files. A process-based comparison over several seeds uses the same scenario and metric contracts:
@@ -21,7 +24,7 @@ python -m mpcs sweep --dataset synthetic --methods localsum mra fed-ltd `
   --seeds 11 29 --max-workers 2 --output output/comparison
 ```
 
-Use `--tensorboard` to write scalar events under each method's `tensorboard/` directory. `--no-progress` disables terminal output; JSONL events and metrics are still recorded.
+Use `--tensorboard` to write scalar events under each run's `tensorboard/` directory. `--no-progress` disables terminal output; JSONL events and metrics are still recorded. PPO trains one platform at a time, rotating platforms by episode. The default episode count is at least the number of platforms. Pass `--episodes` to choose a longer run and `--device cuda` when a working CUDA installation is available.
 
 ## Data
 
@@ -36,4 +39,4 @@ For a complete typed configuration, pass `--config path/to/config.json` in place
 
 ## Algorithms and results
 
-The built-in baseline implementations live separately under `mpcs/algorithms/baseline/`: `localsum`, `rl-capa`, `mra`, `impgta`, and `fed-ltd`. PPO training uses the same simulation and result interfaces. A run writes `events.jsonl` for preparation and, for each method, `events.jsonl`, `progress.json`, raw `metrics.csv`, `metrics.png`, and `summary.json`. A sweep also writes aggregate `metrics.csv` and `summary.json` at its root. TensorBoard logs are optional.
+The built-in baseline implementations live separately under `mpcs/algorithms/baseline/`: `localsum`, `rl-capa`, `mra`, `impgta`, and `fed-ltd`. Independent PPO is trained with `train-ppo`; a trained checkpoint registers as `ppo` for a common comparison run. Training writes `episodes.jsonl`, `episodes.csv`, `training.png`, and periodic checkpoints. A comparison writes `events.jsonl` for preparation and, for each method, `events.jsonl`, `progress.json`, raw `metrics.csv`, `metrics.png`, and `summary.json`. A sweep also writes aggregate `metrics.csv` and `summary.json` at its root. TensorBoard logs are optional.

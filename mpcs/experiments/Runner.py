@@ -10,12 +10,12 @@ import json
 from math import ceil, fsum
 from pathlib import Path
 from time import monotonic
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from mpcs.algorithms.baseline import BaselineMethod, build_baseline_components
 from mpcs.algorithms.baseline.Greedy import build_neutral_greedy_context
 from mpcs.config import DatasetSplit, ExperimentConfig
-from mpcs.core.Domain import PlatformActionBatch, PlatformObservation
+from mpcs.core.Domain import JointStepResult, PlatformActionBatch, PlatformObservation
 from mpcs.core.Framework import Environment, PreparedEnvironment
 from .Progress import StageReporter, TerminalProgress
 from .Reporting import ArtifactWriter, EventLog
@@ -33,6 +33,24 @@ class AlgorithmSession(Protocol):
 
     @property
     def batch_processing_time_s_by_platform(self) -> Mapping[str, float]: ...
+
+
+@runtime_checkable
+class FrameAwareSession(Protocol):
+    """Optional physical-frame hooks for stateful evaluation policies."""
+
+    def start_episode(self) -> None: ...
+
+    def begin_frame(self, observations: Mapping[str, PlatformObservation]) -> None: ...
+
+    def end_frame(
+        self,
+        observations: Mapping[str, PlatformObservation],
+        actions: Mapping[str, PlatformActionBatch],
+        result: JointStepResult,
+    ) -> None: ...
+
+    def finish_episode(self) -> None: ...
 
 
 AlgorithmFactory = Callable[
@@ -206,6 +224,9 @@ class ExperimentRunner:
             )
             try:
                 observations = environment.reset(seed)
+                frame_session = session if isinstance(session, FrameAwareSession) else None
+                if frame_session is not None:
+                    session.start_episode()
                 started = monotonic()
                 max_batches = ceil(
                     (config.simulation.end_time_s - config.simulation.start_time_s)
@@ -213,6 +234,8 @@ class ExperimentRunner:
                 )
                 batch = 0
                 while not environment.done:
+                    if frame_session is not None:
+                        frame_session.begin_frame(observations)
                     nonempty = {
                         platform_id: bool(observations[platform_id].waiting_pickups)
                         for platform_id in config.platform_ids
@@ -224,6 +247,8 @@ class ExperimentRunner:
                         for platform_id in config.platform_ids
                     }
                     result = environment.step(actions)
+                    if frame_session is not None:
+                        frame_session.end_frame(observations, actions, result)
                     observations = result.next_platform_observations
                     batch += 1
                     progress = environment.pickup_progress_snapshot
@@ -259,6 +284,8 @@ class ExperimentRunner:
                         raise RuntimeError("simulation exceeded configured horizon")
                 metrics = environment.metrics
                 progress = environment.pickup_progress_snapshot
+                if frame_session is not None:
+                    frame_session.finish_episode()
                 return {
                     "method": method,
                     "split": prepared.dataset_split.value,

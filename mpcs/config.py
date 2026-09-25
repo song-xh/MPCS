@@ -952,7 +952,6 @@ class PPOConfig:
     """Autoregressive actor and centralized value-learning settings."""
 
     local_feature_dim: int = arguments.PPO_LOCAL_FEATURE_DIM
-    federated_embedding_dim: int = arguments.PPO_FEDERATED_EMBEDDING_DIM
     batch_context_dim: int = arguments.PPO_BATCH_CONTEXT_DIM
     decision_context_dim: int = arguments.PPO_DECISION_CONTEXT_DIM
     central_context_dim: int = arguments.PPO_CENTRAL_CONTEXT_DIM
@@ -976,7 +975,6 @@ class PPOConfig:
     def validate(self) -> None:
         for name in (
             "local_feature_dim",
-            "federated_embedding_dim",
             "batch_context_dim",
             "decision_context_dim",
             "central_context_dim",
@@ -1559,11 +1557,6 @@ class ExperimentConfig:
             )
         if self.federated.participant_platform_ids != self.platform_ids:
             raise ValueError("federated participant set must match platform IDs")
-        if (
-            self.federated.shared_embedding_dim
-            != self.ppo.federated_embedding_dim
-        ):
-            raise ValueError("federated and PPO embedding dimensions must match")
         if (
             self.federated.enabled
             != self.flta_mode.federation_enabled
