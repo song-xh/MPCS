@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 import json
 from math import fsum
 from pathlib import Path
-from time import monotonic, perf_counter
+from time import perf_counter
 from typing import Mapping
 
 import torch
@@ -31,6 +31,7 @@ from mpcs.core.Domain import (
 from mpcs.core.Framework import Environment, PreparedEnvironment
 from mpcs.utility import normalize_decision_reward, policy_profit_delta
 from mpcs.experiments.Progress import TerminalProgress
+from mpcs.experiments.Runner import run_episode
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +105,7 @@ class PPOPolicySession:
         self._pending: dict[str, dict[str, _PendingRelease]] = {
             platform_id: {} for platform_id in config.platform_ids
         }
+        self._rewards = {platform_id: 0.0 for platform_id in config.platform_ids}
         self._auctioneer = PaperAuctioneer(config=config.auction, tie_seed=seed)
         self._frame_private: dict[str, tuple[float, ...]] = {}
         self._frame_central: tuple[float, ...] = ()
@@ -118,6 +120,10 @@ class PPOPolicySession:
     @property
     def batch_processing_time_s_by_platform(self) -> Mapping[str, float]:
         return self._bpt
+
+    @property
+    def reward_by_platform(self) -> Mapping[str, float]:
+        return self._rewards
 
     def prepare_frame(self, observations: Mapping[str, PlatformObservation]) -> None:
         self._batches = {
@@ -324,6 +330,7 @@ class PPOPolicySession:
                 done=result.done,
             )
             rewards[platform_id] = reward
+            self._rewards[platform_id] += reward
         return rewards
 
 
@@ -436,59 +443,17 @@ class PPOTrainer:
     def _run_episode(
         self, prepared: PreparedEnvironment, *, seed: int, explore: bool
     ) -> dict[str, object]:
-        network = prepared.road_network.fork_runtime()
-        isolated = replace(
+        summary, session = run_episode(
+            self.config,
             prepared,
-            road_network=network,
-            station_index=prepared.station_index.clone_for_road_network(network),
+            lambda config, isolated, run_seed: PPOPolicySession(
+                config, isolated, self.agents, seed=run_seed, explore=explore
+            ),
+            seed=seed,
+            method="ppo",
+            manage_session=False,
         )
-        started = monotonic()
-        try:
-            session = PPOPolicySession(
-                self.config, isolated, self.agents, seed=seed, explore=explore
-            )
-            environment = Environment.from_prepared(
-                config=self.config, prepared=isolated, **session.environment_kwargs()
-            )
-            try:
-                observations = environment.reset(seed)
-                batches = 0
-                rewards = {platform_id: 0.0 for platform_id in self.config.platform_ids}
-                while not environment.done:
-                    session.prepare_frame(observations)
-                    central = session.critic_context(observations)
-                    private = {
-                        platform_id: session.critic_context({platform_id: observations[platform_id]})
-                        for platform_id in self.config.platform_ids
-                    }
-                    actions = {
-                        platform_id: session.decide(platform_id, observations[platform_id])
-                        for platform_id in self.config.platform_ids
-                    }
-                    result = environment.step(actions)
-                    step_rewards = session.record_step(
-                        observations, actions, result, private, central
-                    )
-                    for platform_id, reward in step_rewards.items():
-                        rewards[platform_id] += reward
-                    observations = result.next_platform_observations
-                    batches += 1
-                progress = environment.pickup_progress_snapshot
-                metrics = environment.metrics
-                return {
-                    "batches": batches,
-                    "total_pickups": progress.total,
-                    "assigned_pickups": progress.assigned,
-                    "assignment_rate": progress.assigned / progress.total if progress.total else 0.0,
-                    "operating_profit": fsum(metrics.ledger_totals_by_platform.values()),
-                    "profit_by_platform": dict(metrics.ledger_totals_by_platform),
-                    "reward_by_platform": rewards,
-                    "wall_runtime_s": monotonic() - started,
-                }
-            finally:
-                environment.close()
-        finally:
-            network.close()
+        return {**summary, "reward_by_platform": dict(session.reward_by_platform)}
 
     def save_checkpoint(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -144,6 +144,112 @@ def _baseline_factory(method: BaselineMethod) -> AlgorithmFactory:
     return build
 
 
+def run_episode(
+    config: ExperimentConfig,
+    prepared: PreparedEnvironment,
+    factory: AlgorithmFactory,
+    *,
+    seed: int,
+    method: str,
+    on_batch: Callable[[Mapping[str, int | float]], None] | None = None,
+    manage_session: bool = True,
+) -> tuple[dict[str, object], AlgorithmSession]:
+    """Drive one isolated scenario through the shared physical-frame loop."""
+    runtime_network = prepared.road_network.fork_runtime()
+    isolated = replace(
+        prepared,
+        road_network=runtime_network,
+        station_index=prepared.station_index.clone_for_road_network(runtime_network),
+    )
+    try:
+        session = factory(config, isolated, seed)
+        environment = Environment.from_prepared(
+            config=config, prepared=isolated, **session.environment_kwargs()
+        )
+        try:
+            observations = environment.reset(seed)
+            frame_session = session if isinstance(session, FrameAwareSession) else None
+            if frame_session is not None and manage_session:
+                frame_session.start_episode()
+            started = monotonic()
+            max_batches = ceil(
+                (config.simulation.end_time_s - config.simulation.start_time_s)
+                / config.simulation.step_size_s
+            )
+            batch = 0
+            while not environment.done:
+                if frame_session is not None:
+                    frame_session.begin_frame(observations)
+                nonempty = {
+                    platform_id: bool(observations[platform_id].waiting_pickups)
+                    for platform_id in config.platform_ids
+                }
+                actions = {
+                    platform_id: session.decide(
+                        platform_id, observations[platform_id], config
+                    )
+                    for platform_id in config.platform_ids
+                }
+                result = environment.step(actions)
+                if frame_session is not None:
+                    frame_session.end_frame(observations, actions, result)
+                observations = result.next_platform_observations
+                batch += 1
+                progress = environment.pickup_progress_snapshot
+                metrics = environment.metrics
+                bpt = session.batch_processing_time_s_by_platform
+                active_bpt = [
+                    bpt[platform_id]
+                    for platform_id in config.platform_ids
+                    if nonempty[platform_id]
+                ]
+                record = {
+                    "batch": batch,
+                    "simulated_time_s": environment.current_time_s,
+                    "assigned": progress.assigned,
+                    "expired": progress.expired,
+                    "waiting": progress.waiting,
+                    "cross_pool": progress.cross_pool,
+                    "total": progress.total,
+                    "local_assignments": metrics.local_assignment_count,
+                    "cross_assignments": metrics.cross_assignment_count,
+                    "assignment_rate": progress.assigned / progress.total
+                    if progress.total else 0.0,
+                    "profit": fsum(metrics.ledger_totals_by_platform.values()),
+                    "mean_bpt_s": fsum(active_bpt) / len(active_bpt)
+                    if active_bpt else 0.0,
+                    "wall_runtime_s": monotonic() - started,
+                }
+                if on_batch is not None:
+                    on_batch(record)
+                if batch > max_batches:
+                    raise RuntimeError("simulation exceeded configured horizon")
+            if frame_session is not None and manage_session:
+                frame_session.finish_episode()
+            metrics = environment.metrics
+            progress = environment.pickup_progress_snapshot
+            return ({
+                "method": method,
+                "split": prepared.dataset_split.value,
+                "seed": seed,
+                "batches": batch,
+                "total_pickups": progress.total,
+                "assigned_pickups": progress.assigned,
+                "expired_pickups": progress.expired,
+                "assignment_rate": progress.assigned / progress.total
+                if progress.total else 0.0,
+                "local_assignments": metrics.local_assignment_count,
+                "cross_assignments": metrics.cross_assignment_count,
+                "profit_by_platform": dict(metrics.ledger_totals_by_platform),
+                "operating_profit": fsum(metrics.ledger_totals_by_platform.values()),
+                "wall_runtime_s": monotonic() - started,
+            }, session)
+        finally:
+            environment.close()
+    finally:
+        runtime_network.close()
+
+
 class ExperimentRunner:
     def __init__(self, registry: AlgorithmRegistry | None = None) -> None:
         self.registry = builtin_algorithms() if registry is None else registry
@@ -209,107 +315,21 @@ class ExperimentRunner:
         writer: ArtifactWriter,
         terminal: TerminalProgress,
     ) -> dict[str, object]:
-        runtime_network = prepared.road_network.fork_runtime()
-        isolated = replace(
-            prepared,
-            road_network=runtime_network,
-            station_index=prepared.station_index.clone_for_road_network(
-                runtime_network
-            ),
-        )
-        try:
-            session = self.registry.create(method, config, isolated, seed)
-            environment = Environment.from_prepared(
-                config=config, prepared=isolated, **session.environment_kwargs()
-            )
-            try:
-                observations = environment.reset(seed)
-                frame_session = session if isinstance(session, FrameAwareSession) else None
-                if frame_session is not None:
-                    session.start_episode()
-                started = monotonic()
-                max_batches = ceil(
-                    (config.simulation.end_time_s - config.simulation.start_time_s)
-                    / config.simulation.step_size_s
-                )
-                batch = 0
-                while not environment.done:
-                    if frame_session is not None:
-                        frame_session.begin_frame(observations)
-                    nonempty = {
-                        platform_id: bool(observations[platform_id].waiting_pickups)
-                        for platform_id in config.platform_ids
-                    }
-                    actions = {
-                        platform_id: session.decide(
-                            platform_id, observations[platform_id], config
-                        )
-                        for platform_id in config.platform_ids
-                    }
-                    result = environment.step(actions)
-                    if frame_session is not None:
-                        frame_session.end_frame(observations, actions, result)
-                    observations = result.next_platform_observations
-                    batch += 1
-                    progress = environment.pickup_progress_snapshot
-                    metrics = environment.metrics
-                    bpt = session.batch_processing_time_s_by_platform
-                    active_bpt = [
-                        bpt[platform_id]
-                        for platform_id in config.platform_ids
-                        if nonempty[platform_id]
-                    ]
-                    record = {
-                        "batch": batch,
-                        "simulated_time_s": environment.current_time_s,
-                        "assigned": progress.assigned,
-                        "expired": progress.expired,
-                        "waiting": progress.waiting,
-                        "cross_pool": progress.cross_pool,
-                        "total": progress.total,
-                        "local_assignments": metrics.local_assignment_count,
-                        "cross_assignments": metrics.cross_assignment_count,
-                        "assignment_rate": progress.assigned / progress.total
-                        if progress.total
-                        else 0.0,
-                        "profit": fsum(metrics.ledger_totals_by_platform.values()),
-                        "mean_bpt_s": fsum(active_bpt) / len(active_bpt)
-                        if active_bpt
-                        else 0.0,
-                        "wall_runtime_s": monotonic() - started,
-                    }
-                    writer.batch(record)
-                    terminal.batch(method, record)
-                    if batch > max_batches:
-                        raise RuntimeError("simulation exceeded configured horizon")
-                metrics = environment.metrics
-                progress = environment.pickup_progress_snapshot
-                if frame_session is not None:
-                    frame_session.finish_episode()
-                return {
-                    "method": method,
-                    "split": prepared.dataset_split.value,
-                    "seed": seed,
-                    "batches": batch,
-                    "total_pickups": progress.total,
-                    "assigned_pickups": progress.assigned,
-                    "expired_pickups": progress.expired,
-                    "assignment_rate": progress.assigned / progress.total
-                    if progress.total
-                    else 0.0,
-                    "local_assignments": metrics.local_assignment_count,
-                    "cross_assignments": metrics.cross_assignment_count,
-                    "profit_by_platform": dict(metrics.ledger_totals_by_platform),
-                    "operating_profit": fsum(
-                        metrics.ledger_totals_by_platform.values()
-                    ),
-                    "wall_runtime_s": monotonic() - started,
-                }
-            finally:
-                environment.close()
-        finally:
-            runtime_network.close()
+        def report(record: Mapping[str, int | float]) -> None:
+            writer.batch(record)
+            terminal.batch(method, record)
 
+        summary, _session = run_episode(
+            config,
+            prepared,
+            lambda current, isolated, run_seed: self.registry.create(
+                method, current, isolated, run_seed
+            ),
+            seed=seed,
+            method=method,
+            on_batch=report,
+        )
+        return summary
 
 def _run_point_process(
     config: ExperimentConfig,
