@@ -22,5 +22,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.4"]
 
+[project.scripts]
+mpcs = "mpcs.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["mpcs*"]

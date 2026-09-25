@@ -21,7 +21,8 @@
 | `mpcs/data/Adapters.py` | Chengdu, Shanghai, and synthetic scenario preparation |
 | `mpcs/algorithms/baseline/` | One module per built-in baseline, with shared helpers only where used by multiple methods |
 | `mpcs/algorithms/` | PPO policy and training adapter |
-| `mpcs/experiments/` | Algorithm registry, scenario reuse, progress, reporting, and presets |
+| `mpcs/experiments/Runner.py` and `Presets.py` | Algorithm registry, scenario reuse, process sweeps, and bundled dataset configs |
+| `mpcs/experiments/Progress.py` and `Reporting.py` | Rich terminal progress, JSONL events, raw CSV, plots, and TensorBoard |
 
 Modules are named for cohesive responsibilities. A small helper stays with the module it serves. Shared code moves only when multiple implementations use the same behavior.
 
@@ -35,4 +36,4 @@ PPO training consumes physical-frame observations and settlement rewards. Its st
 
 Road parsing can be skipped by loading a compiled graph artifact. Runtime shortest-path and pair-distance caches, spatial map matching, candidate filtering with exact rescue, and parallel platform planning remain part of the simulation. Cache identity is used only where it changes whether a large source is reparsed.
 
-The reporting boundary emits stage events and physical-frame progress, then writes JSONL events, raw metrics, CSV summaries, and plots. Terminal views and TensorBoard consume those records without changing simulation state.
+The reporting boundary emits stage events and physical-frame progress, then writes JSONL events, raw metrics, CSV summaries, and plots. Terminal views and TensorBoard consume those records without changing simulation state. Process sweeps write per-method `progress.json` snapshots that the parent process reads for a single terminal view.
