@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69,<82"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mpcs-simulator"
+version = "0.1.0"
+description = "Multi-platform spatial crowdsourcing simulator"
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib>=3.8",
+    "networkx>=3.2",
+    "numpy>=1.26",
+    "rich>=13.7",
+    "scipy>=1.11",
+    "tensorboard>=2.16,<2.21",
+    "torch>=2.2",
+    "tqdm>=4.66",
+    "tzdata>=2024.1; platform_system == 'Windows'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.4"]
+
+[tool.setuptools.packages.find]
+include = ["mpcs*"]
