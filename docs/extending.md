@@ -18,7 +18,7 @@ registry = builtin_algorithms()
 registry.register_policy("my-policy", my_decisions)
 ```
 
-The returned mapping must contain one action for each waiting pickup. Route or cross-platform mechanism research can use the full session interface below.
+The returned mapping must contain one action for each waiting pickup. `register_policy` also makes the policy eligible as a mixed-training opponent, using the built-in local matcher. Custom local matching uses `register_local_algorithm` below.
 
 Register an algorithm factory with `AlgorithmRegistry.register(name, factory)`. The factory receives `(config, prepared, seed)` and returns a session with three members:
 
@@ -52,6 +52,32 @@ registry.register("ppo", ppo_checkpoint_factory(checkpoint_path))
 ```
 
 `PPOTrainer(config).train(episodes=..., output_dir=...)` saves per-platform policy and optimizer state at episode boundaries. `load_checkpoint(path)` restores it, and `evaluate(split=..., output_dir=...)` runs one deterministic episode. PPO actions are chosen sequentially within each physical frame; the trainer records one realized reward per platform per frame and updates only the selected platform's policy.
+
+## Preparing data and choosing source days
+
+For Chengdu raw orders, run the tracked `dataset/DataUtils.py` tool before loading the `chengdu` preset:
+
+```powershell
+python dataset/DataUtils.py `
+  --source-root dataset/Didichuxing/Chengdu/dataset `
+  --output-root dataset/Didichuxing/Chengdu/parcel_v2 `
+  --seed 20250308
+```
+
+The tool reads the raw seven-column `order_*` files, writes parcel-v2 ten-column files with deterministic task attributes, and writes `metadata.json`. It shows a dynamic per-day conversion progress bar and a final count table. Raw orders, converted files, and maps stay under the ignored `dataset/` tree; only the tool itself is tracked.
+
+For parcel-v2 mixed training, choose source dates with `platform_days` in a scenario JSON or pass the same mapping to `MPCSRunner.run_mixed`. Every configured platform needs `train`, `validation`, and `test`; each value accepts one `YYYYMMDD` string or a nonempty list. `order_YYYYMMDD` is also accepted. One day belongs to exactly one platform and one split. Overlap is rejected during config validation before any dataset file is opened. The first P1 training day is used as the station-grid reference source.
+
+```json
+{
+  "platform_days": {
+    "P1": {"train": ["20161105", "20161109"], "validation": "20161111", "test": "20161121"},
+    "P2": {"train": "20161106", "validation": "20161112", "test": "20161122"}
+  }
+}
+```
+
+The mapping above illustrates the field shape for a two-platform Chengdu config. The complete four-platform selection is in `examples/chengdu-days.json`. The mixed `summary.json` records `platform_sources` after date selection.
 
 ## Scenario provider
 
@@ -130,7 +156,7 @@ The module must be importable by the Python environment used to run MPCS. Proces
 
 ## Fixed-learner mixed training
 
-`MPCSRunner.run_mixed` trains one PPO agent while each other platform uses a selected baseline or a `register_policy` decision function. The platform count is configurable for the synthetic preset. A registered real dataset or a complete `ExperimentConfig` supplies its own platform count.
+`MPCSRunner.run_mixed` trains one PPO agent while each other platform uses a selected baseline, `register_policy` decision function, or `register_local_algorithm` session. The platform count is configurable for the synthetic preset. A registered real dataset or a complete `ExperimentConfig` supplies its own platform count.
 
 ```python
 runner = MPCSRunner()
@@ -144,11 +170,39 @@ summary = runner.run_mixed(
         "P3": "mra",
         "P4": "my-policy",
     },
+    cross_mechanism="pool-random",
     episodes=20,
     output_dir=output_dir,
 )
 ```
 
-Every platform must have exactly one policy. The mixed session uses each baseline's local decision and matcher components, then applies one shared cross-platform service and PaperAuctioneer for the whole environment. A full `AlgorithmSession` can be compared independently through `ExperimentRunner`; mixed opponents are the five built-in baselines or policies registered with `register_policy`.
+Every platform must have exactly one local policy. The mixed session uses each opponent's local decision and matcher, then applies one shared cross-platform mechanism across the environment. Training, validation, and checkpoint comparison use the same mechanism; only the PPO learner changes to deterministic actions in validation and test. A full `AlgorithmSession` registered with `register_algorithm` remains available for independent comparison.
 
-For a reusable command-line scenario, see `examples/mixed-four-platform.json`. `python -m mpcs mixed --scenario examples/mixed-four-platform.json --output output/mixed` runs training, validation, and one mixed test comparison. CLI `--learner`, `--platform-policy PLATFORM=ALGORITHM`, `--platforms`, `--episodes`, and `--dataset` override their JSON counterparts. `--plugin` loads an importable module before resolving policy names.
+| `cross_mechanism` | Cross-platform selection and settlement |
+| --- | --- |
+| `paper` | Regional bidders with `PaperAuctioneer` |
+| `regional-fixed` | Regional bidders with fixed-payment regional auction |
+| `pool-random` | Randomized candidate pool with fixed-payment regional auction |
+
+`MPCSRunner.cross_mechanism_names` and `python -m mpcs mechanisms` list registered names. Use `runner.register_cross_mechanism(name, factory)` for another global mechanism. The factory receives `(config, prepared, seed)` and returns a mapping with `release_sanitizers`, `cross_bidders`, `auctioneer`, and `serving_quality_provider`; `local_matchers` remain owned by the per-platform algorithms. For example, an importable plugin can pair pool-random bidders with paper settlement:
+
+```python
+from mpcs.core.AuctionUtils import PaperAuctioneer
+from mpcs.experiments.Runner import builtin_cross_mechanisms
+
+
+def pool_paper(config, prepared, seed):
+    services = dict(builtin_cross_mechanisms()["pool-random"](config, prepared, seed))
+    services["auctioneer"] = PaperAuctioneer(config=config.auction, tie_seed=seed)
+    return services
+
+
+def register(runner):
+    runner.register_cross_mechanism("pool-paper", pool_paper)
+```
+
+Register a custom local algorithm with `runner.register_local_algorithm(name, factory)`. Its factory has the same `(config, prepared, seed) -> AlgorithmSession` contract described above. `environment_kwargs()` must supply a `local_matchers` entry for the platform using that algorithm; `decide()` supplies its action batch, and `batch_processing_time_s_by_platform` supplies its processing time. For standalone `run` comparisons, provide local matchers and decisions for all configured platforms. The mixed trainer composes the selected platform's local pieces with the chosen global cross mechanism.
+
+For a reusable command-line scenario, see `examples/mixed-four-platform.json`. `python -m mpcs mixed --scenario examples/mixed-four-platform.json --output output/mixed` runs training, validation, and one mixed test comparison. CLI `--learner`, `--platform-policy PLATFORM=ALGORITHM`, `--cross-mechanism`, `--platforms`, `--episodes`, and `--dataset` override their JSON counterparts. The JSON may also specify `platform_days` and `plugins`; `--plugin` loads another importable module before resolving algorithm and mechanism names. `--config` selects a complete experiment config instead of a dataset preset.
+
+Interactive runs show a single updating Rich panel with stage results and frame progress. The stage events remain in JSONL output. For non-interactive runs, completed stages are printed once; `--no-progress` suppresses the terminal stage view.

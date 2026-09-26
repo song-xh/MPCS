@@ -18,6 +18,7 @@
 | `mpcs/core/DynamicsUtils.py` | Vehicle, station, and task progression |
 | `mpcs/core/SettlementUtils.py` | Assignment, payments, and metric accounting |
 | `mpcs/core/RoadArtifact.py` | Reusable compiled road graph cache |
+| `dataset/DataUtils.py` | Standalone Chengdu raw-order to parcel-v2 preparation tool |
 | `mpcs/data/Adapters.py` | Chengdu, Shanghai, and synthetic scenario preparation |
 | `mpcs/algorithms/baseline/` | One module per built-in baseline, with shared helpers only where used by multiple methods |
 | `mpcs/algorithms/` | PPO policy and training adapter |
@@ -35,10 +36,12 @@ External data adapters provide domain parcels and vehicle snapshots to `prepare_
 
 PPO training consumes physical-frame observations and settlement rewards. Its state encoder and training adapter preserve sequential parcel decisions, legal-action masks, a single recorded reward per physical frame, and rollout updates. Independent PPO training rotates the learning platform each episode; other PPO agents act with frozen weights. A checkpoint supplies a frozen PPO session to the common experiment runner through the optional frame hooks. Training and comparison use the same physical-frame driver.
 
-For a mixed experiment, one fixed platform owns the PPO agent and the other platforms provide baseline or registered decision policies. Each opponent retains its local matcher. The environment uses one shared cross-platform service and auctioneer because cross selection and settlement are global frame rules. The learner alone stores PPO rollout frames and checkpoint state; validation and test replay the same platform lineup with a deterministic learner.
+For a mixed experiment, one fixed platform owns the PPO agent and the other platforms provide baseline, registered decision policies, or registered local algorithm sessions. Each opponent retains its local matcher. A named cross-mechanism factory supplies release sanitizers, bidders, one auctioneer, and serving quality for the entire environment; `paper`, `regional-fixed`, and `pool-random` are built in. The learner alone stores PPO rollout frames and checkpoint state; validation and test replay the same platform lineup and cross mechanism with a deterministic learner. A complete `AlgorithmSession` can still be compared independently.
+
+For parcel-v2 scenarios, `platform_days` maps each platform and each train, validation, and test split to one or more source days. Configuration validation rejects a source day assigned to another platform or split before preparation reads any orders. The prepared scenario then owns the road graph, regions, stations, task partitions, and initial fleets. Environment construction forks a road runtime for each episode or comparison method, so routing caches remain isolated.
 
 ## Performance and observability
 
 Road parsing can be skipped by loading a compiled graph artifact. Runtime shortest-path and pair-distance caches, spatial map matching, candidate filtering with exact rescue, and parallel platform planning remain part of the simulation. Cache identity is used only where it changes whether a large source is reparsed.
 
-The reporting boundary emits stage events and physical-frame progress, then writes JSONL events, raw metrics, CSV summaries, and plots. Terminal views and TensorBoard consume those records without changing simulation state. Process sweeps write per-method `progress.json` snapshots that the parent process reads for a single terminal view. Importable registration modules let workers rebuild the same dataset and algorithm registries.
+The reporting boundary emits stage events with elapsed time and preparation results, including graph node and routing-edge counts, task counts, and fleet counts. One Rich live panel updates stage status and physical-frame progress through the training, validation, and comparison workflow. Non-interactive output prints completed stage summaries instead of frame-by-frame lines. JSONL events, raw metrics, CSV summaries, plots, and TensorBoard consume those records without changing simulation state. Process sweeps write per-method `progress.json` snapshots that the parent process reads for a single terminal view. Importable registration modules let workers rebuild the same dataset and algorithm registries.
