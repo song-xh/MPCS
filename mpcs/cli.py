@@ -20,22 +20,28 @@ def build_parser() -> argparse.ArgumentParser:
     for command in ("algorithms", "datasets"):
         listing = commands.add_parser(command)
         listing.add_argument("--plugin", action="append", default=[])
-    for command in ("run", "sweep", "train-ppo", "pipeline"):
+    for command in ("run", "sweep", "train-ppo", "pipeline", "mixed"):
         sub = commands.add_parser(command)
         sub.add_argument("--plugin", action="append", default=[])
         source = sub.add_mutually_exclusive_group()
         source.add_argument(
             "--dataset",
-            default="synthetic",
+            default=None if command == "mixed" else "synthetic",
         )
         source.add_argument("--config", type=Path)
         sub.add_argument("--output", type=Path, required=True)
         sub.add_argument("--tensorboard", action="store_true")
         sub.add_argument("--no-progress", action="store_true")
-        if command in {"train-ppo", "pipeline"}:
+        if command in {"train-ppo", "pipeline", "mixed"}:
             sub.add_argument("--episodes", type=int)
             sub.add_argument("--seed", type=int)
-            sub.add_argument("--device", default="cpu")
+            sub.add_argument("--device", default=None if command == "mixed" else "cpu")
+            if command == "mixed":
+                sub.add_argument("--scenario", type=Path)
+                sub.add_argument("--platforms", type=int)
+                sub.add_argument("--learner")
+                sub.add_argument("--platform-policy", action="append", default=[])
+                continue
             if command == "train-ppo":
                 continue
         sub.add_argument(
@@ -59,10 +65,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _load_mixed_scenario(path: Path | None) -> dict[str, object]:
+    if path is None:
+        return {}
+    scenario = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(scenario, dict):
+        raise ValueError("mixed scenario must be a JSON object")
+    allowed = {
+        "dataset", "config", "platforms", "learner", "platform_policies",
+        "episodes", "seed", "device", "plugins",
+    }
+    unknown = set(scenario) - allowed
+    if unknown:
+        raise ValueError(f"unknown mixed scenario fields: {sorted(unknown)}")
+    return scenario
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    scenario = _load_mixed_scenario(args.scenario) if args.command == "mixed" else {}
     workflow = MPCSRunner()
-    for module_name in args.plugin:
+    for module_name in (*scenario.get("plugins", ()), *args.plugin):
         workflow.load_plugin(module_name)
     if args.command == "algorithms":
         for name in workflow.algorithms.names:
@@ -71,6 +94,43 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "datasets":
         for name in workflow.dataset_names:
             print(name)
+        return 0
+    if args.command == "mixed":
+        if args.config is not None:
+            config_path, dataset_name = args.config, None
+        elif args.dataset is not None:
+            config_path, dataset_name = None, args.dataset
+        else:
+            config_path = scenario.get("config")
+            dataset_name = scenario.get("dataset")
+        if config_path is not None and dataset_name is not None:
+            raise ValueError("select either a dataset or a full config")
+        if config_path is not None:
+            config_path = Path(config_path)
+            if args.config is None and args.scenario is not None and not config_path.is_absolute():
+                config_path = args.scenario.parent / config_path
+            mixed_dataset = load_experiment_config(config_path).config
+        else:
+            mixed_dataset = dataset_name or "synthetic"
+        policies = dict(scenario.get("platform_policies", {}))
+        for assignment in args.platform_policy:
+            platform_id, separator, method = assignment.partition("=")
+            if not separator or not platform_id or not method:
+                raise ValueError("platform policy must be PLATFORM=ALGORITHM")
+            policies[platform_id] = method
+        result = workflow.run_mixed(
+            dataset=mixed_dataset,
+            output_dir=args.output,
+            learner_platform_id=args.learner or scenario.get("learner", "P1"),
+            opponents_by_platform=policies,
+            platform_count=args.platforms if args.platforms is not None else scenario.get("platforms"),
+            episodes=args.episodes if args.episodes is not None else scenario.get("episodes"),
+            seed=args.seed if args.seed is not None else scenario.get("seed"),
+            device=args.device or scenario.get("device", "cpu"),
+            show_progress=not args.no_progress,
+            tensorboard=args.tensorboard,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     dataset = (
         args.dataset if args.config is None

@@ -1,0 +1,11 @@
+{
+  "dataset": "synthetic",
+  "platforms": 4,
+  "learner": "P1",
+  "platform_policies": {
+    "P2": "rl-capa",
+    "P3": "mra",
+    "P4": "impgta"
+  },
+  "episodes": 2
+}
