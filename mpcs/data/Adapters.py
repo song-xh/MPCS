@@ -171,12 +171,13 @@ class ParcelV2PreparationAdapter:
     ) -> PreparedEnvironmentSplits:
         road_network: RoadNetwork | None = None
         try:
-            with _stage(stage_reporter, "graph_load"):
+            with _stage(stage_reporter, "graph_load") as result:
                 road_network, graph_audit = _load_parcel_road_network(
                     config,
                     road_artifact_dir=None,
                 )
-            with _stage(stage_reporter, "region_build", graph_audit=graph_audit):
+                _record_graph_result(result, road_network, graph_audit)
+            with _stage(stage_reporter, "region_build") as result:
                 reference_orders = read_canonical_orders(
                     (
                         config.paths.dataset_root
@@ -206,17 +207,18 @@ class ParcelV2PreparationAdapter:
                         ),
                     )
                 )
+                result.update(regions=len(region_index.regions), grid_audit=asdict(grid_audit))
             with _stage(
                 stage_reporter,
                 "station_build",
-                grid_audit=asdict(grid_audit),
-            ):
+            ) as result:
                 _validate_index_sizes(
                     config,
                     region_index,
                     station_index,
                 )
-            with _stage(stage_reporter, "dataset_parse"):
+                result["stations"] = len(station_index.stations)
+            with _stage(stage_reporter, "dataset_parse") as result:
                 _validate_parcel_v2_metadata(config)
                 pools = load_platform_order_splits(
                     config.paths.dataset_root,
@@ -224,6 +226,11 @@ class ParcelV2PreparationAdapter:
                     platform_ids=config.platform_ids,
                     region_index=region_index,
                     master_seed=config.master_seed,
+                )
+                result["orders"] = sum(
+                    len(pool.orders)
+                    for platform_pools in pools.values()
+                    for pool in platform_pools.values()
                 )
             return _prepare_pools(
                 config=config,
@@ -249,12 +256,13 @@ class ParcelV2PreparationAdapter:
     ) -> PreparedEnvironment:
         road_network: RoadNetwork | None = None
         try:
-            with _stage(stage_reporter, "graph_load"):
+            with _stage(stage_reporter, "graph_load") as result:
                 road_network, graph_audit = _load_parcel_road_network(
                     config,
                     road_artifact_dir=road_artifact_dir,
                 )
-            with _stage(stage_reporter, "region_build", graph_audit=graph_audit):
+                _record_graph_result(result, road_network, graph_audit)
+            with _stage(stage_reporter, "region_build") as result:
                 reference_orders = read_canonical_orders(
                     tuple(
                         config.paths.dataset_root / source_id
@@ -282,13 +290,14 @@ class ParcelV2PreparationAdapter:
                         ),
                     )
                 )
+                result.update(regions=len(region_index.regions), grid_audit=asdict(grid_audit))
             with _stage(
                 stage_reporter,
                 "station_build",
-                grid_audit=asdict(grid_audit),
-            ):
+            ) as result:
                 _validate_index_sizes(config, region_index, station_index)
-            with _stage(stage_reporter, "dataset_parse", split=split.value):
+                result["stations"] = len(station_index.stations)
+            with _stage(stage_reporter, "dataset_parse", split=split.value) as result:
                 _validate_parcel_v2_metadata(config)
                 pools = load_platform_order_split(
                     config.paths.dataset_root,
@@ -297,6 +306,13 @@ class ParcelV2PreparationAdapter:
                     platform_ids=config.platform_ids,
                     region_index=region_index,
                     master_seed=config.master_seed,
+                )
+                result.update(
+                    orders=sum(len(pool.orders) for pool in pools.values()),
+                    orders_by_platform={
+                        platform_id: len(pool.orders)
+                        for platform_id, pool in pools.items()
+                    },
                 )
             return _prepare_one_split(
                 config=config,
@@ -446,9 +462,10 @@ class SyntheticPreparationAdapter:
     ) -> PreparedEnvironmentSplits:
         road_network: RoadNetwork | None = None
         try:
-            with _stage(stage_reporter, "graph_load"):
+            with _stage(stage_reporter, "graph_load") as result:
                 road_network = _synthetic_road_network(config)
-            with _stage(stage_reporter, "region_build"):
+                _record_graph_result(result, road_network)
+            with _stage(stage_reporter, "region_build") as result:
                 region_index = RegionIndex(
                     regions=(
                         Region(
@@ -459,7 +476,8 @@ class SyntheticPreparationAdapter:
                     ),
                     graph_node_ids=road_network.node_ids,
                 )
-            with _stage(stage_reporter, "station_build"):
+                result["regions"] = len(region_index.regions)
+            with _stage(stage_reporter, "station_build") as result:
                 station_index = StationIndex(
                     stations=(
                         Station(
@@ -477,7 +495,8 @@ class SyntheticPreparationAdapter:
                     region_index,
                     station_index,
                 )
-            with _stage(stage_reporter, "dataset_parse"):
+                result["stations"] = len(station_index.stations)
+            with _stage(stage_reporter, "dataset_parse") as result:
                 pools = {
                     split: {
                         platform_id: _synthetic_pool(
@@ -490,6 +509,11 @@ class SyntheticPreparationAdapter:
                     }
                     for split in DatasetSplit
                 }
+                result["orders"] = sum(
+                    len(pool.orders)
+                    for platform_pools in pools.values()
+                    for pool in platform_pools.values()
+                )
             return _prepare_pools(
                 config=config,
                 road_network=road_network,
@@ -514,9 +538,10 @@ class SyntheticPreparationAdapter:
     ) -> PreparedEnvironment:
         road_network: RoadNetwork | None = None
         try:
-            with _stage(stage_reporter, "graph_load"):
+            with _stage(stage_reporter, "graph_load") as result:
                 road_network = _synthetic_road_network(config)
-            with _stage(stage_reporter, "region_build"):
+                _record_graph_result(result, road_network)
+            with _stage(stage_reporter, "region_build") as result:
                 region_index = RegionIndex(
                     regions=(
                         Region(
@@ -527,7 +552,8 @@ class SyntheticPreparationAdapter:
                     ),
                     graph_node_ids=road_network.node_ids,
                 )
-            with _stage(stage_reporter, "station_build"):
+                result["regions"] = len(region_index.regions)
+            with _stage(stage_reporter, "station_build") as result:
                 station_index = StationIndex(
                     stations=(
                         Station(
@@ -541,7 +567,8 @@ class SyntheticPreparationAdapter:
                     road_network=road_network,
                 )
                 _validate_index_sizes(config, region_index, station_index)
-            with _stage(stage_reporter, "dataset_parse", split=split.value):
+                result["stations"] = len(station_index.stations)
+            with _stage(stage_reporter, "dataset_parse", split=split.value) as result:
                 pools = {
                     platform_id: _synthetic_pool(
                         config=config,
@@ -551,6 +578,13 @@ class SyntheticPreparationAdapter:
                     )
                     for platform_id in config.platform_ids
                 }
+                result.update(
+                    orders=sum(len(pool.orders) for pool in pools.values()),
+                    orders_by_platform={
+                        platform_id: len(pool.orders)
+                        for platform_id, pool in pools.items()
+                    },
+                )
             return _prepare_one_split(
                 config=config,
                 split=split,
@@ -661,9 +695,10 @@ def _prepare_pools(
     adapter: EnvironmentPreparationAdapter,
     stage_reporter: object | None,
 ) -> PreparedEnvironmentSplits:
-    with _stage(stage_reporter, "split_build"):
+    with _stage(stage_reporter, "split_build") as result:
         if frozenset(pools) != frozenset(DatasetSplit):
             raise ValueError("adapter must build every data split")
+        result.update(splits=len(pools), platforms=len(config.platform_ids))
     prepared: dict[DatasetSplit, PreparedEnvironment] = {}
     for split in DatasetSplit:
         platform_pools = dict(pools[split])
@@ -713,7 +748,7 @@ def _prepare_one_split(
         stage_reporter,
         "platform_partition",
         split=split.value,
-    ):
+    ) as result:
         partition = TaskPartitioner(
             road_network=road_network,
             region_index=region_index,
@@ -725,11 +760,25 @@ def _prepare_one_split(
             copied_pools,
             platform_ids=config.platform_ids,
         )
+        pickup_counts = {
+            platform_id: len(dataset.pickup_parcels)
+            for platform_id, dataset in partition.datasets.items()
+        }
+        dropoff_counts = {
+            platform_id: len(dataset.dropoff_parcels)
+            for platform_id, dataset in partition.datasets.items()
+        }
+        result.update(
+            pickups=sum(pickup_counts.values()),
+            dropoffs=sum(dropoff_counts.values()),
+            pickups_by_platform=pickup_counts,
+            dropoffs_by_platform=dropoff_counts,
+        )
     fleet_seeds = _fleet_seeds_for_split(
         config=config,
         split=split,
     )
-    with _stage(stage_reporter, "fleet_init", split=split.value):
+    with _stage(stage_reporter, "fleet_init", split=split.value) as result:
         vehicles = (
             _generate_initial_vehicles(
                 config=config,
@@ -742,6 +791,14 @@ def _prepare_one_split(
             )
             if initial_vehicles_override is None
             else dict(initial_vehicles_override)
+        )
+        vehicle_counts = {
+            platform_id: len(platform_vehicles)
+            for platform_id, platform_vehicles in vehicles.items()
+        }
+        result.update(
+            vehicles=sum(vehicle_counts.values()),
+            vehicles_by_platform=vehicle_counts,
         )
     return PreparedEnvironment(
         dataset_split=split,
@@ -1183,13 +1240,26 @@ def _validate_index_sizes(
         )
 
 
+def _record_graph_result(
+    result: dict[str, object],
+    road_network: RoadNetwork,
+    graph_audit: Mapping[str, object] | None = None,
+) -> None:
+    result.update(
+        nodes=len(road_network.node_ids),
+        routing_edges=road_network.edge_count,
+    )
+    if graph_audit:
+        result["graph_audit"] = dict(graph_audit)
+
+
 def _stage(
     reporter: object | None,
     stage_id: str,
     **details: object,
 ) -> object:
     if reporter is None:
-        return nullcontext()
+        return nullcontext({})
     stage = getattr(reporter, "stage", None)
     if not callable(stage):
         raise TypeError("stage reporter must implement stage()")

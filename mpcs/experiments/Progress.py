@@ -7,8 +7,9 @@ from time import monotonic
 from typing import Callable, Iterator, Mapping, TextIO
 import sys
 
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
+from rich.panel import Panel
 from rich.table import Table
 
 
@@ -22,12 +23,13 @@ class StageReporter:
         self._display = display
 
     @contextmanager
-    def stage(self, stage_id: str, **details: object) -> Iterator[None]:
+    def stage(self, stage_id: str, **details: object) -> Iterator[dict[str, object]]:
         started = monotonic()
+        result: dict[str, object] = {}
         self._emit("stage", {"stage": stage_id, "status": "start", **details})
-        self._display.stage(stage_id, "start")
+        self._display.stage(stage_id, "start", details)
         try:
-            yield
+            yield result
         except BaseException as error:
             payload = {
                 "stage": stage_id,
@@ -35,35 +37,37 @@ class StageReporter:
                 "elapsed_s": monotonic() - started,
                 "error": type(error).__name__,
                 **details,
+                **result,
             }
             self._emit("stage", payload)
-            self._display.stage(stage_id, "fail")
+            self._display.stage(stage_id, "fail", payload)
             raise
         payload = {
             "stage": stage_id,
             "status": "done",
             "elapsed_s": monotonic() - started,
             **details,
+            **result,
         }
         self._emit("stage", payload)
-        self._display.stage(stage_id, "done")
+        self._display.stage(stage_id, "done", payload)
 
 
 class TerminalProgress:
-    """One Rich view for a suite, with a readable non-TTY fallback."""
+    """One updating Rich view on a terminal, with concise log output elsewhere."""
 
     def __init__(self, *, enabled: bool = True, stream: TextIO | None = None) -> None:
         self._stream = sys.stderr if stream is None else stream
         self._enabled = enabled
-        self._console = Console(file=self._stream, force_terminal=False)
+        self._console = Console(file=self._stream)
         self._live: Live | None = None
-        self._stage = "ready"
+        self._stages: list[dict[str, object]] = []
         self._rows: dict[str, tuple[int, int, int, float, float]] = {}
 
     def __enter__(self) -> "TerminalProgress":
         if self._enabled and self._stream.isatty():
             self._live = Live(
-                self._table(), console=self._console, refresh_per_second=4
+                self._panel(), console=self._console, refresh_per_second=4
             )
             self._live.start()
         return self
@@ -73,12 +77,33 @@ class TerminalProgress:
             self._live.stop()
             self._live = None
 
-    def stage(self, stage_id: str, status: str) -> None:
-        self._stage = f"{stage_id}: {status}"
+    def stage(
+        self,
+        stage_id: str,
+        status: str,
+        details: Mapping[str, object] | None = None,
+    ) -> None:
+        record = {"stage": stage_id, "status": status, **(details or {})}
+        if status == "start":
+            self._stages.append(record)
+        else:
+            for index in range(len(self._stages) - 1, -1, -1):
+                if (
+                    self._stages[index]["stage"] == stage_id
+                    and self._stages[index]["status"] == "start"
+                ):
+                    self._stages[index] = record
+                    break
+            else:
+                self._stages.append(record)
         if self._live is not None:
-            self._live.update(self._table())
-        elif self._enabled:
-            self._console.print(f"[{status.upper()}] {stage_id}")
+            self._live.update(self._panel(), refresh=True)
+        elif self._enabled and status != "start":
+            elapsed = record.get("elapsed_s")
+            duration = f" ({float(elapsed):.1f}s)" if elapsed is not None else ""
+            summary = self._details(record)
+            suffix = f"  {summary}" if summary else ""
+            self._console.print(f"[{status.upper()}] {stage_id}{duration}{suffix}")
 
     def batch(self, method: str, record: Mapping[str, object]) -> None:
         self._rows[method] = (
@@ -89,24 +114,45 @@ class TerminalProgress:
             float(record["assignment_rate"]),
         )
         if self._live is not None:
-            self._live.update(self._table())
-        elif self._enabled:
-            batch, assigned, total, profit, rate = self._rows[method]
-            self._console.print(
-                f"{method} batch={batch} assigned={assigned}/{total} "
-                f"AR={rate:.3f} OP={profit:.2f}"
-            )
+            self._live.update(self._panel())
 
-    def _table(self) -> Table:
-        table = Table(title=f"MPCS · {self._stage}")
-        for name in ("Method", "Batch", "Assigned", "AR", "OP"):
-            table.add_column(name, justify="right" if name != "Method" else "left")
+    @staticmethod
+    def _details(record: Mapping[str, object]) -> str:
+        ignored = {"stage", "status", "elapsed_s", "graph_audit", "grid_audit"}
+        parts = []
+        for key, value in record.items():
+            if key in ignored:
+                continue
+            if isinstance(value, Mapping):
+                formatted = ", ".join(f"{name}:{count}" for name, count in value.items())
+            else:
+                formatted = str(value)
+            parts.append(f"{key}={formatted}")
+        return "  ".join(parts)
+
+    def _panel(self) -> Panel:
+        stages = Table(title="Stages", expand=True)
+        stages.add_column("Stage", style="cyan")
+        stages.add_column("State", width=8)
+        stages.add_column("Result")
+        stages.add_column("Time", justify="right", width=8)
+        for record in self._stages[-10:]:
+            elapsed = record.get("elapsed_s")
+            stages.add_row(
+                str(record["stage"]),
+                str(record["status"]),
+                self._details(record),
+                f"{float(elapsed):.1f}s" if elapsed is not None else "",
+            )
+        frames = Table(title="Simulation", expand=True)
+        for name in ("Method", "Frame", "Assigned", "AR", "Profit"):
+            frames.add_column(name, justify="right" if name != "Method" else "left")
         for method, (batch, assigned, total, profit, rate) in self._rows.items():
-            table.add_row(
+            frames.add_row(
                 method,
                 str(batch),
                 f"{assigned}/{total}",
                 f"{rate:.3f}",
                 f"{profit:.2f}",
             )
-        return table
+        return Panel(Group(stages, frames), title="MPCS · Simulator", border_style="blue")

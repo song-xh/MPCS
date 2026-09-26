@@ -446,6 +446,12 @@ class RoadNetwork:
         return self._node_ids
 
     @property
+    def edge_count(self) -> int:
+        """Number of directed edges in the operational routing graph."""
+        self._ensure_open()
+        return int(self._directed_csr.nnz)
+
+    @property
     def node_id_set(self) -> frozenset[str]:
         self._ensure_open()
         return self._node_id_set
