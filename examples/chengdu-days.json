@@ -6,6 +6,7 @@
     "P3": "mra",
     "P4": "impgta"
   },
+  "local_matcher": "greedy",
   "cross_mechanism": "regional-fixed",
   "platform_days": {
     "P1": {"train": ["20161105"], "validation": ["20161111"], "test": ["20161121"]},
