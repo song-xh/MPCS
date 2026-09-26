@@ -107,6 +107,11 @@ class AlgorithmRegistry:
     def names(self) -> tuple[str, ...]:
         return tuple(self._factories)
 
+    def copy(self) -> AlgorithmRegistry:
+        copied = AlgorithmRegistry()
+        copied._factories.update(self._factories)
+        return copied
+
 
 @dataclass(slots=True)
 class _BaselineSession:

@@ -89,3 +89,23 @@ def my_scenario_provider(config, split):
 ```
 
 Each `parcels_by_platform` value is an iterable of `Parcel`; each fleet value is an iterable of `VehicleSnapshot`. The provider owns parsing, split selection, and coordinate conversion. Keep source data and generated maps under `dataset/` so they stay local.
+
+## Complete workflow
+
+`MPCSRunner` keeps dataset and algorithm registration together. A dataset factory receives the output directory and returns an `ExperimentConfig`; its provider prepares the requested split. One `run` call trains PPO, evaluates on validation, and compares selected algorithms on test:
+
+```python
+from mpcs.experiments import MPCSRunner
+
+runner = MPCSRunner()
+runner.register_dataset("my-data", my_config_factory, my_scenario_provider)
+runner.register_policy("my-policy", my_decisions)
+summary = runner.run(
+    dataset="my-data",
+    methods=("my-policy", "ppo"),
+    episodes=20,
+    output_dir=output_dir,
+)
+```
+
+The workflow writes `training/`, `validation/`, `comparison/`, and a root `summary.json`. The road artifact directory is shared across all stages.

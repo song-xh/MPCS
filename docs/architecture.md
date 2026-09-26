@@ -22,6 +22,7 @@
 | `mpcs/algorithms/baseline/` | One module per built-in baseline, with shared helpers only where used by multiple methods |
 | `mpcs/algorithms/` | PPO policy and training adapter |
 | `mpcs/experiments/Runner.py` and `Presets.py` | Algorithm registry, scenario reuse, process sweeps, and bundled dataset configs |
+| `mpcs/experiments/Workflow.py` | Dataset and algorithm registration, training, validation, and comparison entry point |
 | `mpcs/experiments/Progress.py` and `Reporting.py` | Rich terminal progress, JSONL events, raw CSV, plots, and TensorBoard |
 
 Modules are named for cohesive responsibilities. A small helper stays with the module it serves. Shared code moves only when multiple implementations use the same behavior.
@@ -32,7 +33,7 @@ Preparation adapters produce an immutable scenario with a road network, task par
 
 External data adapters provide domain parcels and vehicle snapshots to `prepare_scenario`. That module constructs partition and source records internally. Built-in parcel-v2 and synthetic preparation retain their format-specific validation.
 
-PPO training consumes physical-frame observations and settlement rewards. Its state encoder and training adapter preserve sequential parcel decisions, legal-action masks, a single recorded reward per physical frame, and rollout updates. Each episode selects one platform for learning; other platform policies act with frozen weights. A checkpoint supplies a frozen PPO session to the common experiment runner through the optional frame hooks.
+PPO training consumes physical-frame observations and settlement rewards. Its state encoder and training adapter preserve sequential parcel decisions, legal-action masks, a single recorded reward per physical frame, and rollout updates. Each episode selects one platform for learning; other platform policies act with frozen weights. A checkpoint supplies a frozen PPO session to the common experiment runner through the optional frame hooks. Training and comparison use the same physical-frame driver.
 
 ## Performance and observability
 

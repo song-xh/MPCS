@@ -31,7 +31,7 @@ from mpcs.core.Domain import (
 from mpcs.core.Framework import Environment, PreparedEnvironment
 from mpcs.utility import normalize_decision_reward, policy_profit_delta
 from mpcs.experiments.Progress import TerminalProgress
-from mpcs.experiments.Runner import run_episode
+from mpcs.experiments.Runner import ScenarioProvider, run_episode
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,16 +354,22 @@ class PPOTrainer:
         seed: int | None = None,
         tensorboard: bool = True,
         show_progress: bool = True,
+        scenario_provider: ScenarioProvider | None = None,
+        road_artifact_dir: Path | None = None,
     ) -> list[dict[str, object]]:
         if episodes < 1:
             raise ValueError("episodes must be positive")
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         run_seed = self.config.master_seed if seed is None else seed
-        prepared = Environment.prepare_environment_split(
-            self.config,
-            DatasetSplit.TRAIN,
-            road_artifact_dir=output_dir / "road-cache",
+        prepared = (
+            Environment.prepare_environment_split(
+                self.config,
+                DatasetSplit.TRAIN,
+                road_artifact_dir=road_artifact_dir or output_dir / "road-cache",
+            )
+            if scenario_provider is None
+            else scenario_provider(self.config, DatasetSplit.TRAIN)
         )
         from torch.utils.tensorboard import SummaryWriter
 
@@ -415,12 +421,20 @@ class PPOTrainer:
         split: DatasetSplit = DatasetSplit.TEST,
         seed: int | None = None,
         output_dir: Path,
+        scenario_provider: ScenarioProvider | None = None,
+        road_artifact_dir: Path | None = None,
     ) -> dict[str, object]:
         """Run one deterministic episode with frozen platform policies."""
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        prepared = Environment.prepare_environment_split(
-            self.config, split, road_artifact_dir=output_dir / "road-cache"
+        prepared = (
+            Environment.prepare_environment_split(
+                self.config,
+                split,
+                road_artifact_dir=road_artifact_dir or output_dir / "road-cache",
+            )
+            if scenario_provider is None
+            else scenario_provider(self.config, split)
         )
         try:
             for agent in self.agents.values():
