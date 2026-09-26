@@ -109,3 +109,21 @@ summary = runner.run(
 ```
 
 The workflow writes `training/`, `validation/`, `comparison/`, and a root `summary.json`. The road artifact directory is shared across all stages.
+
+For CLI use, put registration in an importable Python module:
+
+```python
+# my_experiment.py
+def register(runner):
+    runner.register_dataset("my-data", my_config_factory, my_scenario_provider)
+    runner.register_policy("my-policy", my_decisions)
+```
+
+```powershell
+python -m mpcs pipeline --plugin my_experiment --dataset my-data `
+  --methods my-policy ppo --episodes 20 --output output/my-experiment
+python -m mpcs sweep --plugin my_experiment --dataset my-data `
+  --methods my-policy localsum --seeds 11 29 --output output/my-sweep
+```
+
+The module must be importable by the Python environment used to run MPCS. Process sweep workers import it by name, so registrations are rebuilt in each worker. `mpcs algorithms --plugin my_experiment` and `mpcs datasets --plugin my_experiment` list available names.

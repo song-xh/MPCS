@@ -10,14 +10,16 @@ Python 3.11 or later is required. From the repository root:
 
 ```powershell
 python -m pip install -e ".[dev]"
+python -m mpcs pipeline --dataset synthetic --output output/first-experiment
 python -m mpcs algorithms
+python -m mpcs datasets
 python -m mpcs run --dataset synthetic --methods localsum rl-capa --output output/example
 python -m mpcs train-ppo --dataset synthetic --output output/ppo --tensorboard
 python -m mpcs run --dataset synthetic --methods localsum ppo `
   --ppo-checkpoint output/ppo/checkpoints/episode-000002.pt --output output/ppo-compare
 ```
 
-The synthetic preset needs no external files. A process-based comparison over several seeds uses the same scenario and metric contracts:
+`pipeline` trains PPO, evaluates it on validation, and compares it with all five baselines on the test split. The synthetic preset needs no external files. A process-based comparison over several seeds uses the same scenario and metric contracts:
 
 ```powershell
 python -m mpcs sweep --dataset synthetic --methods localsum mra fed-ltd `
@@ -37,6 +39,8 @@ python -m mpcs run --dataset shanghai --split test --methods localsum --output o
 
 For a complete typed configuration, pass `--config path/to/config.json` in place of `--dataset`. See [Adding algorithms and datasets](docs/extending.md) for the Python interfaces.
 
+An importable Python module can register a new dataset or algorithm with the same runner. Pass it as `--plugin module_name` to `pipeline`, `run`, `train-ppo`, or `sweep`. The module exposes `register(runner)`; the runner offers `register_dataset`, `register_policy`, and `register_algorithm`. See [Adding algorithms and datasets](docs/extending.md) for an example.
+
 ## Algorithms and results
 
-The built-in baseline implementations live separately under `mpcs/algorithms/baseline/`: `localsum`, `rl-capa`, `mra`, `impgta`, and `fed-ltd`. Independent PPO is trained with `train-ppo`; a trained checkpoint registers as `ppo` for a common comparison run. Training writes `episodes.jsonl`, `episodes.csv`, `training.png`, and periodic checkpoints. A comparison writes `events.jsonl` for preparation and, for each method, `events.jsonl`, `progress.json`, raw `metrics.csv`, `metrics.png`, and `summary.json`. A sweep also writes aggregate `metrics.csv` and `summary.json` at its root. TensorBoard logs are optional.
+The built-in baseline implementations live separately under `mpcs/algorithms/baseline/`: `localsum`, `rl-capa`, `mra`, `impgta`, and `fed-ltd`. Independent PPO is trained with `train-ppo` or `pipeline`; a trained checkpoint registers as `ppo` for a common comparison run. A pipeline writes `training/`, `validation/`, `comparison/`, and root `summary.json`. Training writes `episodes.jsonl`, `episodes.csv`, `training.png`, and periodic checkpoints. A comparison writes `events.jsonl` for preparation and, for each method, `events.jsonl`, `progress.json`, `metrics.csv`, `metrics.png`, and `summary.json`. A sweep also writes aggregate `metrics.csv` and `summary.json` at its root. TensorBoard logs are optional.

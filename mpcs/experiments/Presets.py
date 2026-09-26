@@ -13,6 +13,7 @@ from mpcs.config import (
 
 
 _DATA_ROOT = Path(__file__).resolve().parents[2] / "dataset"
+BUILTIN_DATASETS = ("synthetic", "chengdu", "shanghai", "shanghai16")
 
 
 def _output_paths(config: ExperimentConfig, root: Path) -> ExperimentConfig:

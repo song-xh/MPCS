@@ -411,8 +411,15 @@ def _run_point_process(
     output_dir: Path,
     seed: int | None,
     tensorboard: bool,
+    plugin_modules: tuple[str, ...],
 ) -> dict[str, dict[str, object]]:
-    return ExperimentRunner().run(
+    from .Workflow import MPCSRunner
+
+    workflow = MPCSRunner()
+    for module_name in plugin_modules:
+        workflow.load_plugin(module_name)
+    _config, provider = workflow.resolve_dataset(config, output_dir=output_dir)
+    return ExperimentRunner(workflow.algorithms).run(
         config,
         methods=methods,
         split=split,
@@ -421,6 +428,7 @@ def _run_point_process(
         show_progress=False,
         tensorboard=tensorboard,
         road_artifact_dir=output_dir.parent / "road-cache",
+        scenario_provider=provider,
     )
 
 
@@ -434,16 +442,20 @@ def run_sweep(
     seed: int | None = None,
     tensorboard: bool = False,
     show_progress: bool = True,
+    plugin_modules: Sequence[str] = (),
 ) -> dict[str, dict[str, dict[str, object]]]:
     """Run independent points in bounded processes and collect one result schema."""
     if not points or len(set(points)) != len(points):
         raise ValueError("points must be a non-empty unique mapping")
     if max_workers < 1:
         raise ValueError("max_workers must be positive")
-    if not methods or any(
-        method not in builtin_algorithms().names for method in methods
-    ):
-        raise ValueError("sweep methods must be built-in algorithms")
+    from .Workflow import MPCSRunner
+
+    workflow = MPCSRunner()
+    for module_name in plugin_modules:
+        workflow.load_plugin(module_name)
+    if not methods or any(method not in workflow.algorithms.names for method in methods):
+        raise ValueError("sweep methods must be registered algorithms")
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     results: dict[str, dict[str, dict[str, object]]] = {}
@@ -458,6 +470,7 @@ def run_sweep(
                     output_dir / point_name,
                     seed,
                     tensorboard,
+                    tuple(plugin_modules),
                 ): point_name
                 for point_name, config in points.items()
             }

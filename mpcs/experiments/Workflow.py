@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 
 from mpcs.config import DatasetSplit, ExperimentConfig
-from .Presets import dataset_preset
+from .Presets import BUILTIN_DATASETS, dataset_preset
 from .Runner import (
     AlgorithmFactory,
     DecisionPolicy,
@@ -34,9 +34,7 @@ class MPCSRunner:
         config_factory: DatasetFactory,
         scenario_provider: ScenarioProvider,
     ) -> None:
-        if not name or name in self._datasets or name in {
-            "synthetic", "chengdu", "shanghai", "shanghai16"
-        }:
+        if not name or name in self._datasets or name in BUILTIN_DATASETS:
             raise ValueError(f"dataset name is empty or already registered: {name!r}")
         self._datasets[name] = (config_factory, scenario_provider)
 
@@ -52,13 +50,15 @@ class MPCSRunner:
 
     @property
     def dataset_names(self) -> tuple[str, ...]:
-        return ("synthetic", "chengdu", "shanghai", "shanghai16", *self._datasets)
+        return (*BUILTIN_DATASETS, *self._datasets)
 
     def resolve_dataset(
         self, dataset: str | ExperimentConfig, *, output_dir: Path
     ) -> tuple[ExperimentConfig, ScenarioProvider | None]:
         if isinstance(dataset, ExperimentConfig):
             registration = self._datasets.get(dataset.dataset.name)
+            if dataset.dataset.adapter == "external" and registration is None:
+                raise ValueError("external dataset requires a registered scenario provider")
             return dataset, None if registration is None else registration[1]
         registration = self._datasets.get(dataset)
         if registration is not None:

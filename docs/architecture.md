@@ -39,4 +39,4 @@ PPO training consumes physical-frame observations and settlement rewards. Its st
 
 Road parsing can be skipped by loading a compiled graph artifact. Runtime shortest-path and pair-distance caches, spatial map matching, candidate filtering with exact rescue, and parallel platform planning remain part of the simulation. Cache identity is used only where it changes whether a large source is reparsed.
 
-The reporting boundary emits stage events and physical-frame progress, then writes JSONL events, raw metrics, CSV summaries, and plots. Terminal views and TensorBoard consume those records without changing simulation state. Process sweeps write per-method `progress.json` snapshots that the parent process reads for a single terminal view.
+The reporting boundary emits stage events and physical-frame progress, then writes JSONL events, raw metrics, CSV summaries, and plots. Terminal views and TensorBoard consume those records without changing simulation state. Process sweeps write per-method `progress.json` snapshots that the parent process reads for a single terminal view. Importable registration modules let workers rebuild the same dataset and algorithm registries.
