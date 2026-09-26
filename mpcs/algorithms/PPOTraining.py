@@ -31,7 +31,13 @@ from mpcs.core.Domain import (
 from mpcs.core.Framework import Environment, PreparedEnvironment
 from mpcs.utility import normalize_decision_reward, policy_profit_delta
 from mpcs.experiments.Progress import TerminalProgress
-from mpcs.experiments.Runner import ScenarioProvider, run_episode
+from mpcs.experiments.Runner import (
+    AlgorithmRegistry,
+    AlgorithmSession,
+    ScenarioProvider,
+    builtin_algorithms,
+    run_episode,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +95,7 @@ class PPOPolicySession:
         cross = build_baseline_components("localsum", config, prepared, random_seed=seed)
         self._cross_kwargs = cross.environment_kwargs()
         self._matchers = {
-            platform_id: _PPOLocalMatcher(platform_id) for platform_id in config.platform_ids
+            platform_id: _PPOLocalMatcher(platform_id) for platform_id in agents
         }
         self._encoders = {
             platform_id: ConfiguredLocalObservationEncoder(
@@ -323,27 +329,105 @@ class PPOPolicySession:
                 policy_profit_delta(platform_result.ledger_delta),
                 self.config.reward.normalization_scale,
             )
-            self.agents[platform_id].record_frame(
-                private_context=private_contexts[platform_id],
-                central_context=central_context,
-                reward=reward,
-                done=result.done,
-            )
+            agent = self.agents.get(platform_id)
+            if agent is not None:
+                agent.record_frame(
+                    private_context=private_contexts[platform_id],
+                    central_context=central_context,
+                    reward=reward,
+                    done=result.done,
+                )
             rewards[platform_id] = reward
             self._rewards[platform_id] += reward
         return rewards
 
 
+class _MixedPolicySession(PPOPolicySession):
+    """Use one PPO learner and platform-local opponent policies in one frame."""
+
+    def __init__(
+        self,
+        config: ExperimentConfig,
+        prepared: PreparedEnvironment,
+        agents: Mapping[str, PrivatePPOAgent],
+        opponents: Mapping[str, AlgorithmSession],
+        *,
+        seed: int,
+        explore: bool,
+    ) -> None:
+        super().__init__(config, prepared, agents, seed=seed, explore=explore)
+        self._opponents = opponents
+        self._opponent_matchers = {
+            platform_id: session.environment_kwargs()["local_matchers"][platform_id]
+            for platform_id, session in opponents.items()
+        }
+
+    def environment_kwargs(self) -> dict[str, object]:
+        kwargs = super().environment_kwargs()
+        kwargs["local_matchers"] = {
+            **self._matchers,
+            **self._opponent_matchers,
+        }
+        return kwargs
+
+    def decide(
+        self,
+        platform_id: str,
+        observation: PlatformObservation,
+        config: ExperimentConfig | None = None,
+    ) -> PlatformActionBatch:
+        opponent = self._opponents.get(platform_id)
+        if opponent is not None:
+            return opponent.decide(platform_id, observation, self.config)
+        return super().decide(platform_id, observation, config)
+
+    @property
+    def batch_processing_time_s_by_platform(self) -> Mapping[str, float]:
+        return {
+            **self._bpt,
+            **{
+                platform_id: session.batch_processing_time_s_by_platform[platform_id]
+                for platform_id, session in self._opponents.items()
+            },
+        }
+
+
 class PPOTrainer:
-    def __init__(self, config: ExperimentConfig, *, device: str = "cpu") -> None:
+    def __init__(
+        self,
+        config: ExperimentConfig,
+        *,
+        device: str = "cpu",
+        learner_platform_id: str | None = None,
+        opponents_by_platform: Mapping[str, str] | None = None,
+        algorithm_registry: AlgorithmRegistry | None = None,
+    ) -> None:
         self.config = config
+        self.learner_platform_id = learner_platform_id
+        self.opponents_by_platform = dict(opponents_by_platform or {})
+        self.algorithm_registry = (
+            builtin_algorithms() if algorithm_registry is None else algorithm_registry
+        )
+        if learner_platform_id is None:
+            if self.opponents_by_platform:
+                raise ValueError("opponents require a fixed PPO learner")
+            agent_platforms = config.platform_ids
+        else:
+            if learner_platform_id not in config.platform_ids:
+                raise ValueError(f"unknown PPO learner platform: {learner_platform_id}")
+            if set(self.opponents_by_platform) != set(config.platform_ids) - {learner_platform_id}:
+                raise ValueError("each non-learning platform needs one opponent policy")
+            for method in self.opponents_by_platform.values():
+                if method not in self.algorithm_registry.composable_names:
+                    raise ValueError(f"algorithm cannot join a mixed scenario: {method}")
+            agent_platforms = (learner_platform_id,)
         self.agents = {
             platform_id: PrivatePPOAgent.from_experiment_config(
                 platform_id=platform_id,
                 experiment_config=config,
                 device=device,
             )
-            for platform_id in config.platform_ids
+            for platform_id in agent_platforms
         }
 
     def train(
@@ -378,16 +462,14 @@ class PPOTrainer:
         try:
             with TerminalProgress(enabled=show_progress) as terminal:
                 for episode in range(1, episodes + 1):
-                    learner = self.config.platform_ids[
-                        (episode - 1) % len(self.config.platform_ids)
-                    ]
+                    learner = tuple(self.agents)[(episode - 1) % len(self.agents)]
                     for platform_id, agent in self.agents.items():
                         agent.start_episode(learning=platform_id == learner)
                     record = self._run_episode(prepared, seed=run_seed + episode, explore=True)
                     updates: dict[str, dict[str, object]] = {}
                     for platform_id, agent in self.agents.items():
                         stats = agent.finish_episode(
-                            force_update=episode + len(self.config.platform_ids) > episodes
+                            force_update=episode + len(self.agents) > episodes
                         )
                         if stats is not None:
                             updates[platform_id] = asdict(stats)
@@ -460,14 +542,36 @@ class PPOTrainer:
         summary, session = run_episode(
             self.config,
             prepared,
-            lambda config, isolated, run_seed: PPOPolicySession(
-                config, isolated, self.agents, seed=run_seed, explore=explore
+            lambda config, isolated, run_seed: self.make_session(
+                isolated, seed=run_seed, explore=explore
             ),
             seed=seed,
-            method="ppo",
+            method="mixed" if self.learner_platform_id is not None else "ppo",
             manage_session=False,
         )
         return {**summary, "reward_by_platform": dict(session.reward_by_platform)}
+
+    def make_session(
+        self, prepared: PreparedEnvironment, *, seed: int, explore: bool
+    ) -> PPOPolicySession:
+        if self.learner_platform_id is None:
+            return PPOPolicySession(
+                self.config, prepared, self.agents, seed=seed, explore=explore
+            )
+        opponents = {
+            platform_id: self.algorithm_registry.create(
+                method, self.config, prepared, seed
+            )
+            for platform_id, method in self.opponents_by_platform.items()
+        }
+        return _MixedPolicySession(
+            self.config,
+            prepared,
+            self.agents,
+            opponents,
+            seed=seed,
+            explore=explore,
+        )
 
     def save_checkpoint(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -522,5 +626,27 @@ def ppo_checkpoint_factory(checkpoint: Path):
         trainer = PPOTrainer(config)
         trainer.load_checkpoint(checkpoint)
         return PPOPolicySession(config, prepared, trainer.agents, seed=seed, explore=False)
+
+    return build
+
+
+def mixed_checkpoint_factory(
+    checkpoint: Path,
+    learner_platform_id: str,
+    opponents_by_platform: Mapping[str, str],
+    algorithm_registry: AlgorithmRegistry,
+):
+    """Restore the learner while rebuilding the selected opponent policies."""
+    checkpoint = Path(checkpoint)
+
+    def build(config: ExperimentConfig, prepared: PreparedEnvironment, seed: int):
+        trainer = PPOTrainer(
+            config,
+            learner_platform_id=learner_platform_id,
+            opponents_by_platform=opponents_by_platform,
+            algorithm_registry=algorithm_registry,
+        )
+        trainer.load_checkpoint(checkpoint)
+        return trainer.make_session(prepared, seed=seed, explore=False)
 
     return build

@@ -74,6 +74,7 @@ class AlgorithmRegistry:
 
     def __init__(self) -> None:
         self._factories: dict[str, AlgorithmFactory] = {}
+        self._composable_names: set[str] = set()
 
     def register(self, name: str, factory: AlgorithmFactory) -> None:
         if not name or name in self._factories:
@@ -89,6 +90,7 @@ class AlgorithmRegistry:
             return _DecisionPolicySession(config, prepared, seed, policy)
 
         self.register(name, build)
+        self._composable_names.add(name)
 
     def create(
         self,
@@ -107,9 +109,15 @@ class AlgorithmRegistry:
     def names(self) -> tuple[str, ...]:
         return tuple(self._factories)
 
+    @property
+    def composable_names(self) -> frozenset[str]:
+        """Methods whose local policy and matcher can use shared cross services."""
+        return frozenset(self._composable_names)
+
     def copy(self) -> AlgorithmRegistry:
         copied = AlgorithmRegistry()
         copied._factories.update(self._factories)
+        copied._composable_names.update(self._composable_names)
         return copied
 
 
@@ -193,6 +201,7 @@ def builtin_algorithms() -> AlgorithmRegistry:
         BaselineMethod.FED_LTD,
     ):
         registry.register(method.value, _baseline_factory(method))
+        registry._composable_names.add(method.value)
     return registry
 
 
