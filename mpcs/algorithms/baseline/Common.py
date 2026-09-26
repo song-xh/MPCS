@@ -31,7 +31,6 @@ class BaselineMethod(str, Enum):
     """Names accepted by :func:`build_baseline_components`."""
 
     LOCALSUM = "localsum"
-    CAPA = "capa"
     RL_CAPA = "rl-capa"
     MRA = "mra"
     IMPGTA = "impgta"
@@ -48,7 +47,6 @@ class BaselineMethod(str, Enum):
             "localsum": cls.LOCALSUM,
             "rlcapa": cls.RL_CAPA,
             "rl-capa": cls.RL_CAPA,
-            "capa": cls.CAPA,
             "fedltd": cls.FED_LTD,
             "fed-ltd": cls.FED_LTD,
         }
