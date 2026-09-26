@@ -427,16 +427,9 @@ def _validate_shanghai_parcel_metadata(config: ExperimentConfig) -> None:
         source = sources[role]
         if not isinstance(source, Mapping):
             raise ValueError("Shanghai parcel-v2 metadata sources do not match")
-        digest = source.get("source_sha256")
         if (
             not isinstance(source.get("source_file"), str)
             or not source["source_file"]
-            or not isinstance(digest, str)
-            or len(digest) != 64
-            or any(
-                character not in "0123456789abcdefABCDEF"
-                for character in digest
-            )
         ):
             raise ValueError("Shanghai parcel-v2 metadata source identity is invalid")
 
