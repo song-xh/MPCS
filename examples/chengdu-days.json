@@ -1,0 +1,17 @@
+{
+  "dataset": "chengdu",
+  "learner": "P1",
+  "platform_policies": {
+    "P2": "rl-capa",
+    "P3": "mra",
+    "P4": "impgta"
+  },
+  "cross_mechanism": "regional-fixed",
+  "platform_days": {
+    "P1": {"train": ["20161105"], "validation": ["20161111"], "test": ["20161121"]},
+    "P2": {"train": ["20161106"], "validation": ["20161112"], "test": ["20161122"]},
+    "P3": {"train": ["20161107"], "validation": ["20161113"], "test": ["20161123"]},
+    "P4": {"train": ["20161108"], "validation": ["20161114"], "test": ["20161124"]}
+  },
+  "episodes": 2
+}

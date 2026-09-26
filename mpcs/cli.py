@@ -17,7 +17,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="mpcs", description="Multi-platform crowdsourcing simulator"
     )
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("algorithms", "datasets"):
+    for command in ("algorithms", "datasets", "mechanisms"):
         listing = commands.add_parser(command)
         listing.add_argument("--plugin", action="append", default=[])
     for command in ("run", "sweep", "train-ppo", "pipeline", "mixed"):
@@ -41,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
                 sub.add_argument("--platforms", type=int)
                 sub.add_argument("--learner")
                 sub.add_argument("--platform-policy", action="append", default=[])
+                sub.add_argument("--cross-mechanism")
                 continue
             if command == "train-ppo":
                 continue
@@ -73,7 +74,8 @@ def _load_mixed_scenario(path: Path | None) -> dict[str, object]:
         raise ValueError("mixed scenario must be a JSON object")
     allowed = {
         "dataset", "config", "platforms", "learner", "platform_policies",
-        "episodes", "seed", "device", "plugins",
+        "episodes", "seed", "device", "plugins", "platform_days",
+        "cross_mechanism",
     }
     unknown = set(scenario) - allowed
     if unknown:
@@ -93,6 +95,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "datasets":
         for name in workflow.dataset_names:
+            print(name)
+        return 0
+    if args.command == "mechanisms":
+        for name in workflow.cross_mechanism_names:
             print(name)
         return 0
     if args.command == "mixed":
@@ -123,6 +129,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_dir=args.output,
             learner_platform_id=args.learner or scenario.get("learner", "P1"),
             opponents_by_platform=policies,
+            platform_days=scenario.get("platform_days"),
+            cross_mechanism=args.cross_mechanism or scenario.get("cross_mechanism", "paper"),
             platform_count=args.platforms if args.platforms is not None else scenario.get("platforms"),
             episodes=args.episodes if args.episodes is not None else scenario.get("episodes"),
             seed=args.seed if args.seed is not None else scenario.get("seed"),

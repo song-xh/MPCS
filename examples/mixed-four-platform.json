@@ -7,5 +7,6 @@
     "P3": "mra",
     "P4": "impgta"
   },
+  "cross_mechanism": "regional-fixed",
   "episodes": 2
 }
