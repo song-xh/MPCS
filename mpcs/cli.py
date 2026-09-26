@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Sequence
 
 from mpcs.config import DatasetSplit, load_experiment_config
+from mpcs.core.LocalMatching import LOCAL_MATCHER_NAMES
 from mpcs.experiments import ExperimentRunner, MPCSRunner, run_sweep
 
 
@@ -32,6 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--output", type=Path, required=True)
         sub.add_argument("--tensorboard", action="store_true")
         sub.add_argument("--no-progress", action="store_true")
+        if command in {"run", "train-ppo", "pipeline", "mixed"}:
+            sub.add_argument("--local-matcher", choices=LOCAL_MATCHER_NAMES)
         if command in {"train-ppo", "pipeline", "mixed"}:
             sub.add_argument("--episodes", type=int)
             sub.add_argument("--seed", type=int)
@@ -76,6 +79,7 @@ def _load_mixed_scenario(path: Path | None) -> dict[str, object]:
         "dataset", "config", "platforms", "learner", "platform_policies",
         "episodes", "seed", "device", "plugins", "platform_days",
         "cross_mechanism",
+        "local_matcher",
     }
     unknown = set(scenario) - allowed
     if unknown:
@@ -131,6 +135,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             opponents_by_platform=policies,
             platform_days=scenario.get("platform_days"),
             cross_mechanism=args.cross_mechanism or scenario.get("cross_mechanism", "paper"),
+            local_matcher=args.local_matcher or scenario.get("local_matcher", "greedy"),
             platform_count=args.platforms if args.platforms is not None else scenario.get("platforms"),
             episodes=args.episodes if args.episodes is not None else scenario.get("episodes"),
             seed=args.seed if args.seed is not None else scenario.get("seed"),
@@ -151,6 +156,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             episodes=args.episodes,
             seed=args.seed,
             device=args.device,
+            local_matcher=args.local_matcher or "greedy",
             output_dir=args.output,
             show_progress=not args.no_progress,
             tensorboard=args.tensorboard,
@@ -163,7 +169,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if provider is None and config.dataset.name in {"shanghai", "shanghai16"}:
             raise ValueError("bundled Shanghai parcels are available for the test split")
-        records = PPOTrainer(config, device=args.device).train(
+        records = PPOTrainer(
+            config, device=args.device, local_matcher=args.local_matcher or "greedy"
+        ).train(
             episodes=(
                 max(config.training.total_episodes, len(config.platform_ids))
                 if args.episodes is None
@@ -181,11 +189,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if provider is None and config.dataset.name in {"shanghai", "shanghai16"} and split is not DatasetSplit.TEST:
         raise ValueError("bundled Shanghai parcels are available for the test split")
     if args.command == "run":
+        if args.local_matcher is not None and args.ppo_checkpoint is None:
+            raise ValueError("run --local-matcher requires --ppo-checkpoint")
         registry = workflow.algorithms.copy()
         if args.ppo_checkpoint is not None:
             from mpcs.algorithms.PPOTraining import ppo_checkpoint_factory
 
-            registry.register("ppo", ppo_checkpoint_factory(args.ppo_checkpoint))
+            registry.register(
+                "ppo", ppo_checkpoint_factory(
+                    args.ppo_checkpoint, local_matcher=args.local_matcher or "greedy"
+                )
+            )
         result = ExperimentRunner(registry).run(
             config,
             methods=args.methods,

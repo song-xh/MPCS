@@ -2,32 +2,26 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from math import isfinite
 
 from mpcs.config import ExperimentConfig, GreedyConfig, RoutingConfig
 from mpcs.core.Domain import (
     FrozenFederatedEmbedding,
     FrozenFederatedKnowledgeBatch,
-    LocalAssignmentProposal,
-    LocalMatcher,
     OwnReleaseHistorySnapshot,
     ParcelAction,
     ParcelDecision,
     ParcelDecisionObservation,
     PickupPlanningRequest,
     PlatformActionBatch,
-    PlatformLocalActionView,
     PlatformObservation,
-    PlatformPlanningSnapshot,
     PolicyDecisionContext,
     RouteInsertionOption,
-    RoutePlanningService,
-    VehicleStatus,
 )
 from mpcs.core.GraphUtils import RoadNetwork
+from mpcs.core.LocalMatching import route_option_priority
 from mpcs.core.RouteUtils import InsertionPlanner
-from mpcs.utility import local_net_utility
+from mpcs.utils.Economics import local_net_utility
 
 
 class GreedyParcelPolicy:
@@ -179,81 +173,7 @@ class GreedyParcelPolicy:
             vehicles=vehicles,
             current_time_s=observation.frame.current_time_s,
         )
-        return min(options, key=_option_priority, default=None)
-
-
-class GreedyLocalMatcher(LocalMatcher):
-    """Select the minimum-extra-distance exact option per LOCAL action."""
-
-    __slots__ = ("platform_id",)
-
-    def __init__(self, *, platform_id: str) -> None:
-        if not platform_id:
-            raise ValueError("platform_id must be non-empty")
-        self.platform_id = platform_id
-
-    def plan(
-        self,
-        local_actions: PlatformLocalActionView,
-        own_shadow_state: PlatformPlanningSnapshot,
-        planning: RoutePlanningService,
-    ) -> tuple[LocalAssignmentProposal, ...]:
-        if (
-            local_actions.platform_id != self.platform_id
-            or own_shadow_state.platform_id != self.platform_id
-            or planning.platform_id != self.platform_id
-            or local_actions.frame != own_shadow_state.frame
-        ):
-            raise ValueError("greedy matcher received a foreign platform state")
-        proposals: list[LocalAssignmentProposal] = []
-        shadow_state = own_shadow_state
-        for request in sorted(
-            local_actions.local_pickups,
-            key=lambda item: (
-                item.deadline_s,
-                item.arrival_time_s,
-                item.parcel_id,
-            ),
-        ):
-            best_option = min(
-                planning.feasible_insertions(
-                    request,
-                    shadow_state,
-                ),
-                key=_option_priority,
-                default=None,
-            )
-            if best_option is None:
-                continue
-            proposals.append(
-                LocalAssignmentProposal(
-                    proposal_token=(
-                        f"greedy:{local_actions.frame.decision_frame_id}:"
-                        f"{self.platform_id}:{request.parcel_id}"
-                    ),
-                    frame=local_actions.frame,
-                    platform_id=self.platform_id,
-                    parcel_id=request.parcel_id,
-                    vehicle_id=best_option.vehicle_id,
-                    insertion=best_option,
-                )
-            )
-            shadow_state = PlatformPlanningSnapshot(
-                frame=shadow_state.frame,
-                platform_id=self.platform_id,
-                vehicles=tuple(
-                    replace(
-                        vehicle,
-                        status=VehicleStatus.EN_ROUTE,
-                        route_stops=best_option.proposed_route_stops,
-                        route_version=vehicle.route_version + 1,
-                    )
-                    if vehicle.vehicle_id == best_option.vehicle_id
-                    else vehicle
-                    for vehicle in shadow_state.vehicles
-                ),
-            )
-        return tuple(proposals)
+        return min(options, key=route_option_priority, default=None)
 
 
 def build_neutral_greedy_context(
@@ -306,15 +226,4 @@ def _pickup_priority(
         pickup.deadline_s,
         pickup.arrival_time_s,
         pickup.parcel_id,
-    )
-
-
-def _option_priority(
-    option: RouteInsertionOption,
-) -> tuple[float, float, str, int]:
-    return (
-        option.extra_distance_km,
-        option.projected_pickup_time_s,
-        option.vehicle_id,
-        option.insertion_index,
     )

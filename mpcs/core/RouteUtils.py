@@ -1203,13 +1203,31 @@ class InsertionPlanner:
         vehicles: Sequence[VehicleSnapshot],
         current_time_s: int,
     ) -> tuple[RouteInsertionOption, ...]:
-        """Return exact feasible insertion options for the supplied EVs."""
+        """Return feasible options from the configured EV candidate search."""
 
         return self._search_feasible_insertions(
             parcel=parcel,
             vehicles=vehicles,
             current_time_s=current_time_s,
         ).options
+
+    def all_feasible_insertions(
+        self,
+        *,
+        parcel: PickupPlanningRequest,
+        vehicles: Sequence[VehicleSnapshot],
+        current_time_s: int,
+    ) -> tuple[RouteInsertionOption, ...]:
+        """Evaluate every supplied EV for cardinality-optimal matching."""
+        return tuple(
+            option
+            for vehicle in vehicles
+            for option in self.enumerate_feasible(
+                parcel=parcel,
+                vehicle=vehicle,
+                current_time_s=current_time_s,
+            )
+        )
 
     def _base_projection(
         self,
@@ -1309,6 +1327,19 @@ class RoutePlanningServiceImpl:
             sorted(options, key=_insertion_priority)[
                 : self._insertion_candidate_limit
             ]
+        )
+
+    def all_feasible_insertions(
+        self,
+        parcel: PickupPlanningRequest,
+        own_planning_state: PlatformPlanningSnapshot,
+    ) -> tuple[RouteInsertionOption, ...]:
+        if own_planning_state.platform_id != self.platform_id:
+            raise ValueError("planning state belongs to another platform")
+        return self._planner.all_feasible_insertions(
+            parcel=parcel,
+            vehicles=own_planning_state.vehicles,
+            current_time_s=own_planning_state.frame.current_time_s,
         )
 
 

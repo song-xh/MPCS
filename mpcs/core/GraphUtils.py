@@ -22,7 +22,8 @@ from mpcs.core.RoadNetwork import (  # noqa: F401  (compat re-exports)
     RoadNetwork,
     ShortestPathCacheInfo,
 )
-from mpcs.utility import haversine_distance
+from mpcs.utils import identifier_key
+from mpcs.utils.Economics import haversine_distance
 
 _EXCLUDED_LEGACY_HIGHWAY_VALUES = frozenset(
     {
@@ -506,7 +507,7 @@ class RegionIndex:
         require_full_coverage: bool = True,
     ) -> None:
         ordered_regions = tuple(
-            sorted(regions, key=lambda item: _identifier_key(item.region_id))
+            sorted(regions, key=lambda item: identifier_key(item.region_id))
         )
         if not ordered_regions:
             raise ValueError("RegionIndex requires at least one Region")
@@ -616,7 +617,7 @@ class StationIndex:
         road_network: RoadNetwork,
     ) -> None:
         ordered_stations = tuple(
-            sorted(stations, key=lambda item: _identifier_key(item.station_id))
+            sorted(stations, key=lambda item: identifier_key(item.station_id))
         )
         if not ordered_stations:
             raise ValueError("StationIndex requires at least one Station")
@@ -702,15 +703,6 @@ class StationIndex:
             raise ValueError("operational road node cannot reach any Station")
         return station
 
-
-def _identifier_key(identifier: str) -> tuple[str, int, str]:
-    prefix = identifier.rstrip("0123456789")
-    suffix = identifier[len(prefix) :]
-    return (
-        prefix,
-        int(suffix) if suffix else -1,
-        identifier,
-    )
 
 @dataclass(frozen=True, slots=True)
 class LegacyGridReferenceBounds:

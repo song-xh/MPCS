@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from math import ceil, isfinite
 from types import MappingProxyType
 from typing import Mapping
@@ -14,14 +13,14 @@ from mpcs.core.Domain import (
 )
 from mpcs.core.GraphUtils import RoadNetwork, StationIndex
 from mpcs.core.RouteUtils import InsertionPlanner, RouteProjector
-from mpcs.performance import PerformanceProfiler
-from mpcs.utility import local_net_utility
+from mpcs.utils.Economics import local_net_utility
+from mpcs.utils.Performance import PerformanceProfiler
 
 class ConfiguredLocalObservationEncoder:
     """Build the six private non-federated PPO attributes.
 
-    Exact resource-contention features are intentionally produced by a
-    per-frame sequential planner, not by an order-independent batch encoder.
+    Exact route options describe the frame's current fleet. Local pool choices
+    do not reserve vehicles; the environment matches them after all choices.
     """
 
     __slots__ = (
@@ -113,7 +112,7 @@ class ConfiguredLocalObservationEncoder:
         *,
         profiler: PerformanceProfiler | None = None,
     ) -> _SequentialDecisionBatch:
-        """Create a private shadow planner for one fixed physical frame."""
+        """Create private routing features for one physical frame."""
         _validate_platform_observation(self.platform_id, observation)
         return _SequentialDecisionBatch(
             config=self._config,
@@ -128,11 +127,7 @@ class ConfiguredLocalObservationEncoder:
 
 
 class _SequentialDecisionBatch:
-    """Private, mutable planning shadow for one physical decision frame.
-
-    It mutates only copied ``VehicleSnapshot`` records.  The environment clock
-    and its vehicles are never advanced while policy actions are sequenced.
-    """
+    """Sequence pool decisions using the frame's private routing options."""
 
     __slots__ = (
         "_config",
@@ -141,7 +136,6 @@ class _SequentialDecisionBatch:
         "_pending_by_parcel_id",
         "_profiler",
         "_planner",
-        "_rescue_consumed_by_parcel_id",
         "_road_node_ids",
         "_road_network",
         "_future_capacity",
@@ -188,16 +182,12 @@ class _SequentialDecisionBatch:
         self._future_capacity = []
         for vehicle in observation.vehicles:
             self._update_future_capacity(vehicle)
-        self._rescue_consumed_by_parcel_id: set[str] = set()
         self._action_counts = [0, 0, 0]
         self._initial_pickup_count = len(observation.waiting_pickups)
         self._total_capacity = sum(vehicle.max_capacity for vehicle in observation.vehicles)
         self._edges_by_parcel_id = {}
         for parcel_id, pickup in self._pending_by_parcel_id.items():
-            options, rescue_evaluated = self._options_for_pickup(pickup)
-            self._edges_by_parcel_id[parcel_id] = options
-            if rescue_evaluated:
-                self._rescue_consumed_by_parcel_id.add(parcel_id)
+            self._edges_by_parcel_id[parcel_id] = self._options_for_pickup(pickup)
         count = self._initial_pickup_count
         vehicle_count = len(observation.vehicles)
         mean_fare, mean_urgency = self._pending_statistics()
@@ -277,7 +267,7 @@ class _SequentialDecisionBatch:
         )
 
     def decision_context(self, pickup: ParcelDecisionObservation) -> tuple[float, ...]:
-        """Expose only past actions and the current private planning shadow."""
+        """Expose prior pool choices and current private routing features."""
         mean_fare, mean_urgency = self._pending_statistics()
         return (
             *(count / max(1, self._initial_pickup_count) for count in self._action_counts),
@@ -311,14 +301,7 @@ class _SequentialDecisionBatch:
         return bool(self._pending_by_parcel_id)
 
     def next_pickup(self) -> ParcelDecisionObservation:
-        """Sequence feasible decisions in the environment's LOCAL match order.
-
-        Every LOCAL-feasible pending parcel (exact insertion edges exist in
-        the current shadow) is sequenced before infeasible ones.  Feasible
-        parcels order by deadline, arrival and id, as in the local matcher;
-        infeasible ones follow the same order.  Feasibility is read
-        dynamically here because each ``apply`` refreshes the shadow edges.
-        """
+        """Choose a feasible pickup first, then deadline, arrival, and ID."""
         if not self._pending_by_parcel_id:
             raise RuntimeError("sequential batch has no pending pickup")
         feasible = [
@@ -369,7 +352,7 @@ class _SequentialDecisionBatch:
             for vehicle_id in component_vehicle_ids
         )
         demand = len(component_parcels)
-        # The shadow planner already enumerated these exact private options.
+        # The frame planner already enumerated these exact private options.
         # Reading their best marginal utility must not plan or query routes.
         options = self._edges_by_parcel_id[pickup.parcel_id]
         best_option = (
@@ -424,19 +407,8 @@ class _SequentialDecisionBatch:
             options = self._edges_by_parcel_id[pickup.parcel_id]
             if not options:
                 raise ValueError("LOCAL has no exact feasible insertion")
-            best_option = min(options.values(), key=_insertion_priority)
-            current_vehicle = self._vehicles_by_id[best_option.vehicle_id]
-            if best_option.base_route_version != current_vehicle.route_version:
-                raise RuntimeError("shadow insertion route version is stale")
-            self._vehicles_by_id[best_option.vehicle_id] = replace(
-                current_vehicle,
-                route_version=current_vehicle.route_version + 1,
-                route_stops=best_option.proposed_route_stops,
-            )
             del self._pending_by_parcel_id[pickup.parcel_id]
             del self._edges_by_parcel_id[pickup.parcel_id]
-            self._update_future_capacity(self._vehicles_by_id[best_option.vehicle_id])
-            self._refresh_edges_for_vehicle(best_option.vehicle_id)
             return
         if action in {ParcelAction.WAIT, ParcelAction.RELEASE}:
             del self._pending_by_parcel_id[pickup.parcel_id]
@@ -447,9 +419,9 @@ class _SequentialDecisionBatch:
     def _options_for_pickup(
         self,
         pickup: ParcelDecisionObservation,
-    ) -> tuple[dict[str, RouteInsertionOption], bool]:
+    ) -> dict[str, RouteInsertionOption]:
         if pickup.road_node_id not in self._road_node_ids:
-            return {}, False
+            return {}
         vehicles = tuple(
             vehicle
             for vehicle in self._vehicles_by_id.values()
@@ -483,57 +455,7 @@ class _SequentialDecisionBatch:
                 or _insertion_priority(option) < _insertion_priority(current)
             ):
                 best_by_vehicle[option.vehicle_id] = option
-        return best_by_vehicle, search.rescue_evaluated
-
-    def _best_option(
-        self,
-        *,
-        pickup: ParcelDecisionObservation,
-        vehicle: VehicleSnapshot,
-    ) -> RouteInsertionOption | None:
-        if (
-            pickup.road_node_id not in self._road_node_ids
-            or vehicle.current_road_node_id not in self._road_node_ids
-            or any(
-                stop.road_node_id not in self._road_node_ids
-                for stop in vehicle.route_stops
-            )
-        ):
-            return None
-        request = PickupPlanningRequest(
-            parcel_id=pickup.parcel_id,
-            origin_platform_id=pickup.origin_platform_id,
-            road_node_id=pickup.road_node_id,
-            arrival_time_s=pickup.arrival_time_s,
-            deadline_s=pickup.deadline_s,
-            capacity_units=pickup.capacity_units,
-        )
-        self._profiler.count("route_planning")
-        options = self._planner.feasible_insertions(
-            parcel=request,
-            vehicles=(vehicle,),
-            current_time_s=self._observation.frame.current_time_s,
-        )
-        return min(options, key=_insertion_priority) if options else None
-
-    def _refresh_edges_for_vehicle(self, vehicle_id: str) -> None:
-        vehicle = self._vehicles_by_id[vehicle_id]
-        for parcel_id, pickup in self._pending_by_parcel_id.items():
-            options = self._edges_by_parcel_id[parcel_id]
-            if vehicle_id not in options:
-                continue
-            option = self._best_option(pickup=pickup, vehicle=vehicle)
-            if option is None:
-                options.pop(vehicle_id, None)
-            else:
-                options[vehicle_id] = option
-            if (
-                not options
-                and parcel_id not in self._rescue_consumed_by_parcel_id
-            ):
-                self._rescue_consumed_by_parcel_id.add(parcel_id)
-                refreshed_options, _ = self._options_for_pickup(pickup)
-                self._edges_by_parcel_id[parcel_id] = refreshed_options
+        return best_by_vehicle
 
     def _component_for(
         self,

@@ -9,7 +9,6 @@ dist/
 *.egg-info/
 
 /dataset/*
-!/dataset/DataUtils.py
 /tests/
 /output/
 /cache/

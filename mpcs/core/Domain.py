@@ -1985,6 +1985,12 @@ class RoutePlanningService(Protocol):
         own_planning_state: PlatformPlanningSnapshot,
     ) -> tuple[RouteInsertionOption, ...]: ...
 
+    def all_feasible_insertions(
+        self,
+        parcel: PickupPlanningRequest,
+        own_planning_state: PlatformPlanningSnapshot,
+    ) -> tuple[RouteInsertionOption, ...]: ...
+
 
 class LocalMatcher(Protocol):
     platform_id: str

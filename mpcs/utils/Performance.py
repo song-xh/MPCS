@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-import os
 from threading import Lock
 from time import perf_counter_ns
 from typing import Iterator, Mapping
@@ -18,13 +17,6 @@ class PerformanceProfiler:
     _counts: dict[str, int] = field(default_factory=dict)
     _duration_ns: dict[str, int] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock, repr=False)
-
-    @classmethod
-    def from_environment(cls) -> "PerformanceProfiler":
-        """Create an enabled profiler only for an explicit opt-in."""
-
-        value = os.environ.get("FLTA_PROFILE", "")
-        return cls(enabled=value.strip().lower() in {"1", "true", "yes"})
 
     def count(self, name: str, amount: int = 1) -> None:
         """Add a cheap integer counter when profiling is enabled."""
@@ -72,10 +64,3 @@ class PerformanceProfiler:
             "counts": counts,
             "timings_ms": timings_ms,
         }
-
-    def reset(self) -> None:
-        """Clear the current interval without changing enabled state."""
-
-        with self._lock:
-            self._counts.clear()
-            self._duration_ns.clear()

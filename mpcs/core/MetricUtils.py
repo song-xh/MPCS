@@ -17,7 +17,7 @@ from mpcs.core.Domain import (
     SettlementLedger,
 )
 from mpcs.core.DynamicsUtils import DynamicsEvent, DynamicsEventType
-from mpcs.utility import (
+from mpcs.utils.Economics import (
     add_platform_profit_breakdowns,
     platform_profit_breakdown,
     platform_profit_total,

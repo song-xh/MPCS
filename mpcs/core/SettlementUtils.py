@@ -53,7 +53,7 @@ from mpcs.core.RouteUtils import (
     InsertionPlanner,
     RouteProjector,
 )
-from mpcs.utility import (
+from mpcs.utils.Economics import (
     cross_origin_utility,
     cross_serving_utility,
     local_net_utility,

@@ -17,6 +17,7 @@ from .Runner import (
     CrossMechanismFactory,
     DecisionPolicy,
     ExperimentRunner,
+    PoolPolicyFactory,
     ScenarioProvider,
     builtin_algorithms,
     builtin_cross_mechanisms,
@@ -47,12 +48,9 @@ class MPCSRunner:
             raise ValueError(f"dataset name is empty or already registered: {name!r}")
         self._datasets[name] = (config_factory, scenario_provider)
 
-    def register_algorithm(self, name: str, factory: AlgorithmFactory) -> None:
-        self.algorithms.register(name, factory)
-
-    def register_local_algorithm(self, name: str, factory: AlgorithmFactory) -> None:
-        """Register a session with local decisions and matchers for mixed runs."""
-        self.algorithms.register_local_algorithm(name, factory)
+    def register_pool_policy(self, name: str, factory: PoolPolicyFactory) -> None:
+        """Register a platform policy that only chooses LOCAL, RELEASE, or WAIT."""
+        self.algorithms.register_pool_policy(name, factory)
 
     def register_cross_mechanism(
         self, name: str, factory: CrossMechanismFactory
@@ -61,7 +59,7 @@ class MPCSRunner:
 
         The factory receives ``(config, prepared, seed)`` and returns
         ``release_sanitizers``, ``cross_bidders``, ``auctioneer``, and
-        ``serving_quality_provider``. Local matchers come from platform policies.
+        ``serving_quality_provider``. The environment chooses local matchers.
         """
         if not name or name in self._cross_mechanisms:
             raise ValueError(
@@ -120,6 +118,7 @@ class MPCSRunner:
         episodes: int | None = None,
         seed: int | None = None,
         device: str = "cpu",
+        local_matcher: str = "greedy",
         show_progress: bool = True,
         tensorboard: bool = False,
         validation_split: DatasetSplit = DatasetSplit.VALIDATION,
@@ -147,7 +146,7 @@ class MPCSRunner:
             max(config.training.total_episodes, len(config.platform_ids))
             if episodes is None else episodes
         )
-        trainer = PPOTrainer(config, device=device)
+        trainer = PPOTrainer(config, device=device, local_matcher=local_matcher)
         return self._run_training(
             config=config,
             provider=provider,
@@ -156,12 +155,15 @@ class MPCSRunner:
             episode_count=episode_count,
             methods=selected_methods,
             trained_method="ppo",
-            checkpoint_factory=ppo_checkpoint_factory,
+            checkpoint_factory=lambda checkpoint: ppo_checkpoint_factory(
+                checkpoint, local_matcher=local_matcher
+            ),
             seed=seed,
             show_progress=show_progress,
             tensorboard=tensorboard,
             validation_split=validation_split,
             comparison_split=comparison_split,
+            summary_fields={"local_matcher": local_matcher},
         )
 
     def run_mixed(
@@ -172,6 +174,7 @@ class MPCSRunner:
         learner_platform_id: str,
         opponents_by_platform: Mapping[str, str],
         cross_mechanism: str = "paper",
+        local_matcher: str = "greedy",
         platform_days: Mapping[str, Mapping[str, str | list[str]]] | None = None,
         platform_count: int | None = None,
         episodes: int | None = None,
@@ -201,7 +204,7 @@ class MPCSRunner:
             raise ValueError(f"unknown cross mechanism: {cross_mechanism}") from error
         opponents = {}
         for platform_id, method in opponents_by_platform.items():
-            if method not in self.algorithms.names:
+            if method not in self.algorithms.pool_policy_names:
                 try:
                     method = BaselineMethod.parse(method).value
                 except ValueError:
@@ -214,6 +217,7 @@ class MPCSRunner:
             opponents_by_platform=opponents,
             algorithm_registry=self.algorithms,
             cross_mechanism_factory=cross_factory,
+            local_matcher=local_matcher,
         )
         source_fields = {}
         if config.dataset.adapter == "parcel_v2":
@@ -238,6 +242,7 @@ class MPCSRunner:
                 opponents,
                 self.algorithms,
                 cross_factory,
+                local_matcher,
             ),
             seed=seed,
             show_progress=show_progress,
@@ -247,6 +252,8 @@ class MPCSRunner:
             summary_fields={
                 "learner_platform_id": learner_platform_id,
                 "cross_mechanism": cross_mechanism,
+                "local_matcher": local_matcher,
+                "platform_policy_role": "pool_selection",
                 **source_fields,
                 "platform_policies": {
                     platform_id: (

@@ -35,7 +35,6 @@ class BaselineMethod(str, Enum):
     MRA = "mra"
     IMPGTA = "impgta"
     FED_LTD = "fed-ltd"
-    FLTA = "flta"
 
     @classmethod
     def parse(cls, value: "BaselineMethod | str") -> "BaselineMethod":
@@ -44,11 +43,8 @@ class BaselineMethod(str, Enum):
         normalized = str(value).strip().lower().replace("_", "-")
         aliases = {
             "local-sum": cls.LOCALSUM,
-            "localsum": cls.LOCALSUM,
             "rlcapa": cls.RL_CAPA,
-            "rl-capa": cls.RL_CAPA,
             "fedltd": cls.FED_LTD,
-            "fed-ltd": cls.FED_LTD,
         }
         if normalized in aliases:
             return aliases[normalized]

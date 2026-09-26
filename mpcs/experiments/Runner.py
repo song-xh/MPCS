@@ -13,9 +13,13 @@ from pathlib import Path
 from time import monotonic, perf_counter
 from typing import Protocol, runtime_checkable
 
-from mpcs.algorithms.baseline import BaselineMethod, build_baseline_components
+from mpcs.algorithms.baseline import (
+    BaselineMethod,
+    build_baseline_components,
+    build_baseline_pool_policies,
+)
+from mpcs.algorithms.baseline.Framework import BaselineBatchPolicy
 from mpcs.algorithms.baseline.Greedy import build_neutral_greedy_context
-from mpcs.algorithms.baseline.Greedy import GreedyLocalMatcher
 from mpcs.config import DatasetSplit, ExperimentConfig
 from mpcs.core.AuctionUtils import PaperAuctioneer
 from mpcs.core.Domain import (
@@ -26,12 +30,27 @@ from mpcs.core.Domain import (
     PlatformObservation,
 )
 from mpcs.core.Framework import Environment, PreparedEnvironment
+from mpcs.core.LocalMatching import build_local_matchers
 from .Progress import StageReporter, TerminalProgress
 from .Reporting import ArtifactWriter, EventLog
 
 
 class AlgorithmSession(Protocol):
     def environment_kwargs(self) -> dict[str, object]: ...
+
+    def decide(
+        self,
+        platform_id: str,
+        observation: PlatformObservation,
+        config: ExperimentConfig,
+    ) -> PlatformActionBatch: ...
+
+    @property
+    def batch_processing_time_s_by_platform(self) -> Mapping[str, float]: ...
+
+
+class PoolPolicy(Protocol):
+    """Choose LOCAL, RELEASE, or WAIT without assigning vehicles."""
 
     def decide(
         self,
@@ -65,6 +84,9 @@ class FrameAwareSession(Protocol):
 AlgorithmFactory = Callable[
     [ExperimentConfig, PreparedEnvironment, int], AlgorithmSession
 ]
+PoolPolicyFactory = Callable[
+    [ExperimentConfig, PreparedEnvironment, int], PoolPolicy
+]
 CrossMechanismFactory = Callable[
     [ExperimentConfig, PreparedEnvironment, int], Mapping[str, object]
 ]
@@ -91,11 +113,11 @@ def prepared_stage_details(prepared: PreparedEnvironment) -> dict[str, int]:
 
 
 class AlgorithmRegistry:
-    """Explicit extension point for local and external algorithms."""
+    """Keep reference algorithms separate from mixed-scenario pool policies."""
 
     def __init__(self) -> None:
         self._factories: dict[str, AlgorithmFactory] = {}
-        self._composable_names: set[str] = set()
+        self._pool_factories: dict[str, PoolPolicyFactory] = {}
 
     def register(self, name: str, factory: AlgorithmFactory) -> None:
         if not name or name in self._factories:
@@ -103,19 +125,23 @@ class AlgorithmRegistry:
         self._factories[name] = factory
 
     def register_policy(self, name: str, policy: DecisionPolicy) -> None:
-        """Register a decision-only policy with standard matching and auction."""
+        """Register a simple pool decision function for mixed and standalone runs."""
+        if not name or name in self._factories or name in self._pool_factories:
+            raise ValueError(f"policy name is empty or already registered: {name!r}")
 
         def build(
             config: ExperimentConfig, prepared: PreparedEnvironment, seed: int
         ) -> AlgorithmSession:
             return _DecisionPolicySession(config, prepared, seed, policy)
 
-        self.register_local_algorithm(name, build)
+        self._factories[name] = build
+        self._pool_factories[name] = build
 
-    def register_local_algorithm(self, name: str, factory: AlgorithmFactory) -> None:
-        """Register a session whose local decisions and matcher can be composed."""
-        self.register(name, factory)
-        self._composable_names.add(name)
+    def register_pool_policy(self, name: str, factory: PoolPolicyFactory) -> None:
+        """Register a stateful per-platform pool policy factory."""
+        if not name or name in self._pool_factories:
+            raise ValueError(f"pool policy name is empty or already registered: {name!r}")
+        self._pool_factories[name] = factory
 
     def create(
         self,
@@ -130,19 +156,31 @@ class AlgorithmRegistry:
             raise ValueError(f"unknown algorithm: {name}") from error
         return factory(config, prepared, seed)
 
+    def create_pool_policy(
+        self,
+        name: str,
+        config: ExperimentConfig,
+        prepared: PreparedEnvironment,
+        seed: int,
+    ) -> PoolPolicy:
+        try:
+            factory = self._pool_factories[name]
+        except KeyError as error:
+            raise ValueError(f"unknown pool policy: {name}") from error
+        return factory(config, prepared, seed)
+
     @property
     def names(self) -> tuple[str, ...]:
         return tuple(self._factories)
 
     @property
-    def composable_names(self) -> frozenset[str]:
-        """Methods whose local policy and matcher can use shared cross services."""
-        return frozenset(self._composable_names)
+    def pool_policy_names(self) -> frozenset[str]:
+        return frozenset(self._pool_factories)
 
     def copy(self) -> AlgorithmRegistry:
         copied = AlgorithmRegistry()
         copied._factories.update(self._factories)
-        copied._composable_names.update(self._composable_names)
+        copied._pool_factories.update(self._pool_factories)
         return copied
 
 
@@ -159,13 +197,42 @@ class _BaselineSession:
         observation: PlatformObservation,
         config: ExperimentConfig,
     ) -> PlatformActionBatch:
-        return self.components.policies[platform_id].decide(
-            build_neutral_greedy_context(observation=observation, config=config)
-        )
+        return _baseline_decide(self.components.policies, platform_id, observation, config)
 
     @property
     def batch_processing_time_s_by_platform(self) -> Mapping[str, float]:
         return self.components.batch_processing_time_s_by_platform
+
+
+def _baseline_decide(
+    policies: Mapping[str, BaselineBatchPolicy],
+    platform_id: str,
+    observation: PlatformObservation,
+    config: ExperimentConfig,
+) -> PlatformActionBatch:
+    return policies[platform_id].decide(
+        build_neutral_greedy_context(observation=observation, config=config)
+    )
+
+
+@dataclass(slots=True)
+class _BaselinePoolSession:
+    policies: Mapping[str, BaselineBatchPolicy]
+
+    def decide(
+        self,
+        platform_id: str,
+        observation: PlatformObservation,
+        config: ExperimentConfig,
+    ) -> PlatformActionBatch:
+        return _baseline_decide(self.policies, platform_id, observation, config)
+
+    @property
+    def batch_processing_time_s_by_platform(self) -> Mapping[str, float]:
+        return {
+            platform_id: policy.batch_processing_time_s
+            for platform_id, policy in self.policies.items()
+        }
 
 
 class _DecisionPolicySession:
@@ -180,10 +247,7 @@ class _DecisionPolicySession:
         self._defaults = build_baseline_components(
             "localsum", config, prepared, random_seed=seed
         )
-        self._matchers = {
-            platform_id: GreedyLocalMatcher(platform_id=platform_id)
-            for platform_id in config.platform_ids
-        }
+        self._matchers = build_local_matchers(config.platform_ids, "greedy")
         self._times = {platform_id: 0.0 for platform_id in config.platform_ids}
 
     def environment_kwargs(self) -> dict[str, object]:
@@ -225,7 +289,9 @@ def builtin_algorithms() -> AlgorithmRegistry:
         BaselineMethod.IMPGTA,
         BaselineMethod.FED_LTD,
     ):
-        registry.register_local_algorithm(method.value, _baseline_factory(method))
+        factory = _baseline_factory(method)
+        registry.register(method.value, factory)
+        registry.register_pool_policy(method.value, _baseline_pool_factory(method))
     return registry
 
 
@@ -272,21 +338,43 @@ def _baseline_factory(method: BaselineMethod) -> AlgorithmFactory:
     def build(
         config: ExperimentConfig, prepared: PreparedEnvironment, seed: int
     ) -> AlgorithmSession:
-        future = {
-            platform_id: prepared.task_partition.datasets[platform_id].pickup_parcels
-            for platform_id in config.platform_ids
-        }
         return _BaselineSession(
             build_baseline_components(
                 method,
                 config,
                 prepared,
-                future_parcels_by_platform=future,
+                future_parcels_by_platform=_baseline_future_parcels(config, prepared),
                 random_seed=seed,
             )
         )
 
     return build
+
+
+def _baseline_pool_factory(method: BaselineMethod) -> PoolPolicyFactory:
+    def build(
+        config: ExperimentConfig, prepared: PreparedEnvironment, seed: int
+    ) -> PoolPolicy:
+        return _BaselinePoolSession(
+            build_baseline_pool_policies(
+                method,
+                config,
+                prepared,
+                future_parcels_by_platform=_baseline_future_parcels(config, prepared),
+                random_seed=seed,
+            )
+        )
+
+    return build
+
+
+def _baseline_future_parcels(
+    config: ExperimentConfig, prepared: PreparedEnvironment
+) -> dict[str, tuple]:
+    return {
+        platform_id: prepared.task_partition.datasets[platform_id].pickup_parcels
+        for platform_id in config.platform_ids
+    }
 
 
 def run_episode(

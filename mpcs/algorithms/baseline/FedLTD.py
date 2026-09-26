@@ -20,7 +20,7 @@ from mpcs.core.Domain import (
     RouteInsertionOption,
     RoutePlanningService,
 )
-from mpcs.utility import local_net_utility
+from mpcs.utils.Economics import local_net_utility
 
 
 from .Common import (

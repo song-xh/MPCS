@@ -18,7 +18,7 @@ from scipy.sparse.csgraph import dijkstra
 from scipy.spatial import cKDTree
 
 from mpcs.core.Domain import GeoPoint
-from mpcs.performance import PerformanceProfiler
+from mpcs.utils.Performance import PerformanceProfiler
 
 RoadGraph = nx.MultiDiGraph | nx.DiGraph | nx.Graph | nx.MultiGraph
 _METERS_PER_LATITUDE_DEGREE = 111_195.0

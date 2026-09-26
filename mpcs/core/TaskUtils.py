@@ -30,6 +30,7 @@ from mpcs.core.GraphUtils import (
     RoadNetwork,
     StationIndex,
 )
+from mpcs.utils import identifier_key
 
 
 _MANIFEST_SCHEMA_VERSION = 3
@@ -329,7 +330,7 @@ class PartitionManifest:
         if self.master_seed < 0:
             raise ValueError("master_seed must be non-negative")
         platform_ids = tuple(
-            sorted(set(self.platform_ids), key=_identifier_key)
+            sorted(set(self.platform_ids), key=identifier_key)
         )
         if not platform_ids:
             raise ValueError("manifest requires at least one platform")
@@ -339,7 +340,7 @@ class PartitionManifest:
         source_selections = tuple(
             sorted(
                 self.source_selections,
-                key=lambda item: _identifier_key(item.platform_id),
+                key=lambda item: identifier_key(item.platform_id),
             )
         )
         if not source_selections:
@@ -360,7 +361,7 @@ class PartitionManifest:
             sorted(
                 self.entries,
                 key=lambda item: (
-                    _identifier_key(item.origin_platform_id),
+                    identifier_key(item.origin_platform_id),
                     _parcel_type_rank(item.parcel_type),
                     item.canonical_order_id,
                 ),
@@ -572,7 +573,7 @@ class TaskPartition:
 
     def __post_init__(self) -> None:
         copied = dict(self.datasets)
-        if tuple(sorted(copied, key=_identifier_key)) != self.manifest.platform_ids:
+        if tuple(sorted(copied, key=identifier_key)) != self.manifest.platform_ids:
             raise ValueError("partition datasets do not match manifest platforms")
         object.__setattr__(self, "datasets", MappingProxyType(copied))
 
@@ -754,7 +755,7 @@ def load_platform_order_splits(
     root = Path(dataset_root)
     if not root.is_dir():
         raise FileNotFoundError(f"dataset root is not a directory: {root}")
-    ordered_platform_ids = tuple(sorted(set(platform_ids), key=_identifier_key))
+    ordered_platform_ids = tuple(sorted(set(platform_ids), key=identifier_key))
     if not ordered_platform_ids or len(ordered_platform_ids) != len(platform_ids):
         raise ValueError(
             "platform source mappings must match requested platform IDs"
@@ -1010,7 +1011,7 @@ def _resolve_platform_source_groups(
     if not root.is_dir():
         raise FileNotFoundError(f"dataset root is not a directory: {root}")
     ordered_platform_ids = tuple(
-        sorted(set(platform_ids), key=_identifier_key)
+        sorted(set(platform_ids), key=identifier_key)
     )
     if (
         not ordered_platform_ids
@@ -1142,7 +1143,7 @@ def scan_formal_window_order_split(
     groups = tuple(
         sorted(
             _FORMAL_BASE_SOURCE_GROUPS if source_groups is None else source_groups,
-            key=_identifier_key,
+            key=identifier_key,
         )
     )
     if not groups or len(groups) != len(set(groups)):
@@ -1227,7 +1228,7 @@ def scan_independent_formal_window_order_split(
         raise TypeError("split must be a DatasetSplit")
     dataset_config.validate()
     ordered_platform_ids = tuple(
-        sorted(set(platform_ids), key=_identifier_key)
+        sorted(set(platform_ids), key=identifier_key)
     )
     if (
         not ordered_platform_ids
@@ -1338,7 +1339,7 @@ def assign_formal_window_orders(
     matching platform. No random seed is accepted or consulted.
     """
 
-    ordered_platform_ids = tuple(sorted(set(platform_ids), key=_identifier_key))
+    ordered_platform_ids = tuple(sorted(set(platform_ids), key=identifier_key))
     if (
         not ordered_platform_ids
         or len(ordered_platform_ids) != len(platform_ids)
@@ -1347,7 +1348,7 @@ def assign_formal_window_orders(
         raise ValueError(
             "formal window platform count must be one of 2, 4, 8, 12, or 16"
         )
-    source_groups = tuple(sorted(orders_by_group, key=_identifier_key))
+    source_groups = tuple(sorted(orders_by_group, key=identifier_key))
     if not source_groups:
         raise ValueError("formal source groups must be non-empty")
     sorted_orders_by_group = {
@@ -1577,7 +1578,7 @@ def load_platform_order_split(
         platform_ids=platform_ids,
     )
     ordered_platform_ids = tuple(
-        sorted(source_ids_by_platform, key=_identifier_key)
+        sorted(source_ids_by_platform, key=identifier_key)
     )
 
     platform_pools: dict[str, CanonicalOrderPool] = {}
@@ -1962,7 +1963,7 @@ class TaskPartitioner:
 
         pools = dict(pools_by_platform)
         ordered_platform_ids = tuple(
-            sorted(set(platform_ids), key=_identifier_key)
+            sorted(set(platform_ids), key=identifier_key)
         )
         if (
             not ordered_platform_ids
@@ -2036,7 +2037,7 @@ def build_partition_manifest(
     """Assign one canonical source to at most one platform and parcel type."""
     dataset_config.validate()
     ordered_platform_ids = tuple(
-        sorted(set(platform_ids), key=_identifier_key)
+        sorted(set(platform_ids), key=identifier_key)
     )
     if not ordered_platform_ids or len(ordered_platform_ids) != len(platform_ids):
         raise ValueError("platform_ids must be non-empty and unique")
@@ -2140,7 +2141,7 @@ def build_platform_source_partition_manifest_linear(
 
     dataset_config.validate()
     ordered_platform_ids = tuple(
-        sorted(set(platform_ids), key=_identifier_key)
+        sorted(set(platform_ids), key=identifier_key)
     )
     if (
         not ordered_platform_ids
@@ -2481,7 +2482,7 @@ def build_formal_window_partition_manifest(
     if type(master_seed) is not int or master_seed < 0:
         raise ValueError("master_seed must be a non-negative integer")
     ordered_platform_ids = tuple(
-        sorted(set(platform_ids), key=_identifier_key)
+        sorted(set(platform_ids), key=identifier_key)
     )
     if (
         not ordered_platform_ids
@@ -2490,7 +2491,7 @@ def build_formal_window_partition_manifest(
         raise ValueError("platform IDs must be non-empty and unique")
     if set(source_ids_by_platform) != set(ordered_platform_ids):
         raise ValueError("formal source mappings must cover platforms exactly")
-    scan_groups = tuple(sorted(scan.orders_by_group, key=_identifier_key))
+    scan_groups = tuple(sorted(scan.orders_by_group, key=identifier_key))
     if not scan_groups:
         raise ValueError("formal scan must contain at least one source group")
     source_selections = tuple(
@@ -2641,7 +2642,7 @@ def build_independent_formal_window_partition_manifest(
     if type(master_seed) is not int or master_seed < 0:
         raise ValueError("formal allocation seed must be non-negative")
     ordered_platform_ids = tuple(
-        sorted(set(platform_ids), key=_identifier_key)
+        sorted(set(platform_ids), key=identifier_key)
     )
     if (
         not ordered_platform_ids
@@ -2881,7 +2882,7 @@ def _capacitated_global_match(
             buckets,
             key=lambda bucket: (
                 len(adjacency[bucket]) - quotas[bucket],
-                _identifier_key(bucket[0]),
+                identifier_key(bucket[0]),
                 _parcel_type_rank(bucket[1]),
             ),
         )
@@ -3121,16 +3122,6 @@ def _canonical_json(value: object) -> str:
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
-    )
-
-
-def _identifier_key(identifier: str) -> tuple[str, int, str]:
-    prefix = identifier.rstrip("0123456789")
-    suffix = identifier[len(prefix):]
-    return (
-        prefix,
-        int(suffix) if suffix else -1,
-        identifier,
     )
 
 

@@ -182,7 +182,7 @@ class _LocalAlgorithm(LocalSumRule, RLCAPARule, MRARule, IMPGTARule, FedLTDRule)
         ordered = tuple(sorted(requests, key=_pickup_priority))
         if self.method is BaselineMethod.LOCALSUM:
             proposals = self._localsum(ordered, state, planning)
-        elif self.method in {BaselineMethod.CAPA, BaselineMethod.RL_CAPA}:
+        elif self.method is BaselineMethod.RL_CAPA:
             proposals = self._capa(ordered, state, planning)
         elif self.method is BaselineMethod.MRA:
             proposals = self._mra(ordered, state, planning)
@@ -323,7 +323,6 @@ class BaselineComponents:
     auctioneer: Any | None
     release_sanitizers: Mapping[str, Any] | None = None
     serving_quality_provider: Any | None = None
-    reuse_existing_cross_components: bool = False
 
     def environment_kwargs(self) -> dict[str, Any]:
         """Return the exact keyword set accepted by ``Environment.from_prepared``."""
@@ -358,6 +357,92 @@ class BaselineComponents:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _BaselineLocals:
+    method: BaselineMethod
+    platform_ids: tuple[str, ...]
+    config: BaselineConfig
+    algorithms: Mapping[str, _LocalAlgorithm]
+    policies: Mapping[str, BaselineBatchPolicy]
+
+
+def _build_baseline_locals(
+    method: BaselineMethod | str,
+    config: Any,
+    prepared: Any,
+    *,
+    future_parcels_by_platform: Mapping[str, Iterable[Any]] | None,
+    random_seed: int | None,
+) -> _BaselineLocals:
+    resolved = BaselineMethod.parse(method)
+    platform_ids = tuple(getattr(config, "platform_ids", ()))
+    if not platform_ids:
+        platform_ids = tuple(getattr(prepared, "platform_ids", ()))
+    if not platform_ids:
+        partition = getattr(prepared, "task_partition", None)
+        manifest = getattr(partition, "manifest", None)
+        platform_ids = tuple(getattr(manifest, "platform_ids", ()))
+    if not platform_ids:
+        raise ValueError("config or prepared must provide platform_ids")
+    road_network = getattr(prepared, "road_network", None)
+    if road_network is None:
+        raise ValueError("prepared must provide road_network")
+    baseline_config = _method_config(
+        config,
+        seed=int(
+            getattr(config, "master_seed", 0) if random_seed is None else random_seed
+        ),
+    )
+    station_index = getattr(prepared, "station_index", None)
+    future = future_parcels_by_platform or {}
+    algorithms = MappingProxyType(
+        {
+            platform_id: _LocalAlgorithm(
+                method=resolved,
+                platform_id=platform_id,
+                road_network=road_network,
+                config=baseline_config,
+                station_index=(
+                    station_index if resolved is BaselineMethod.RL_CAPA else None
+                ),
+                future_parcels=tuple(future.get(platform_id, ())),
+            )
+            for platform_id in platform_ids
+        }
+    )
+    policies = MappingProxyType(
+        {
+            platform_id: BaselineBatchPolicy(algorithm)
+            for platform_id, algorithm in algorithms.items()
+        }
+    )
+    return _BaselineLocals(
+        method=resolved,
+        platform_ids=platform_ids,
+        config=baseline_config,
+        algorithms=algorithms,
+        policies=policies,
+    )
+
+
+def build_baseline_pool_policies(
+    method: BaselineMethod | str,
+    config: Any,
+    prepared: Any,
+    *,
+    future_parcels_by_platform: Mapping[str, Iterable[Any]] | None = None,
+    random_seed: int | None = None,
+) -> Mapping[str, BaselineBatchPolicy]:
+    """Build only the platform policies used to select LOCAL/CROSS/WAIT pools."""
+    return _build_baseline_locals(
+        method,
+        config,
+        prepared,
+        future_parcels_by_platform=future_parcels_by_platform,
+        random_seed=random_seed,
+    ).policies
+
+
 def build_baseline_components(
     method: BaselineMethod | str,
     config: Any,
@@ -379,58 +464,26 @@ def build_baseline_components(
     caller's PaperCrossBidder/PaperAuctioneer contract when supplied.
     """
 
-    resolved = BaselineMethod.parse(method)
-    if resolved is BaselineMethod.FLTA:
-        raise ValueError("FLTA is not a baseline component")
-    platform_ids = tuple(getattr(config, "platform_ids", ()))
-    if not platform_ids:
-        platform_ids = tuple(getattr(prepared, "platform_ids", ()))
-    if not platform_ids:
-        partition = getattr(prepared, "task_partition", None)
-        manifest = getattr(partition, "manifest", None)
-        platform_ids = tuple(getattr(manifest, "platform_ids", ()))
-    if not platform_ids:
-        raise ValueError("config or prepared must provide platform_ids")
-    road_network = getattr(prepared, "road_network", None)
-    region_index = getattr(prepared, "region_index", None)
-    station_index = getattr(prepared, "station_index", None)
-    if road_network is None:
-        raise ValueError("prepared must provide road_network")
-    baseline_config = _method_config(
+    locals_ = _build_baseline_locals(
+        method,
         config,
-        seed=int(
-            getattr(config, "master_seed", 0) if random_seed is None else random_seed
-        ),
+        prepared,
+        future_parcels_by_platform=future_parcels_by_platform,
+        random_seed=random_seed,
     )
-    future = future_parcels_by_platform or {}
-    algorithms = {
-        platform_id: _LocalAlgorithm(
-            method=resolved,
-            platform_id=platform_id,
-            road_network=road_network,
-            config=baseline_config,
-            station_index=(
-                station_index
-                if resolved in {BaselineMethod.CAPA, BaselineMethod.RL_CAPA}
-                else None
-            ),
-            future_parcels=tuple(future.get(platform_id, ())),
-        )
-        for platform_id in platform_ids
-    }
-    policies = MappingProxyType(
-        {
-            platform_id: BaselineBatchPolicy(algorithm)
-            for platform_id, algorithm in algorithms.items()
-        }
-    )
+    resolved = locals_.method
+    platform_ids = locals_.platform_ids
+    baseline_config = locals_.config
+    algorithms = locals_.algorithms
+    policies = locals_.policies
+    region_index = getattr(prepared, "region_index", None)
     matchers = MappingProxyType(
         {
             platform_id: BaselineLocalMatcher(algorithm)
             for platform_id, algorithm in algorithms.items()
         }
     )
-    is_capa = resolved in {BaselineMethod.CAPA, BaselineMethod.RL_CAPA}
+    is_capa = resolved is BaselineMethod.RL_CAPA
     reuse_cross_components = (
         is_capa
         and release_sanitizers is not None
@@ -463,7 +516,6 @@ def build_baseline_components(
             auctioneer=existing_auctioneer,
             release_sanitizers=sanitizers,
             serving_quality_provider=quality_provider,
-            reuse_existing_cross_components=True,
         )
     if region_index is None:
         raise ValueError("prepared must provide region_index for cross baselines")

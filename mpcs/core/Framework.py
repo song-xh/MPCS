@@ -94,6 +94,7 @@ from mpcs.core.GraphUtils import (
 )
 from mpcs.core.MetricUtils import EventMetricAggregator, MetricSnapshot
 from mpcs.core.RouteUtils import InsertionPlanner
+from mpcs.core.LocalMatching import build_local_matchers
 from mpcs.core.SettlementUtils import (
     CrossReleaseBinding,
     SettlementEngine,
@@ -779,6 +780,32 @@ class _PlatformPlanningService(RoutePlanningService):
         parcel: PickupPlanningRequest,
         own_planning_state: PlatformPlanningSnapshot,
     ) -> tuple[RouteInsertionOption, ...]:
+        self._validate_local_request(parcel, own_planning_state)
+        options = self._planner.feasible_insertions(
+            parcel=parcel,
+            vehicles=own_planning_state.vehicles,
+            current_time_s=self._frame.current_time_s,
+        )
+        return self._sorted_options(options)
+
+    def all_feasible_insertions(
+        self,
+        parcel: PickupPlanningRequest,
+        own_planning_state: PlatformPlanningSnapshot,
+    ) -> tuple[RouteInsertionOption, ...]:
+        self._validate_local_request(parcel, own_planning_state)
+        options = self._planner.all_feasible_insertions(
+            parcel=parcel,
+            vehicles=own_planning_state.vehicles,
+            current_time_s=self._frame.current_time_s,
+        )
+        return self._sorted_options(options)
+
+    def _validate_local_request(
+        self,
+        parcel: PickupPlanningRequest,
+        own_planning_state: PlatformPlanningSnapshot,
+    ) -> None:
         if (
             own_planning_state.platform_id != self.platform_id
             or own_planning_state.frame != self._frame
@@ -794,11 +821,11 @@ class _PlatformPlanningService(RoutePlanningService):
             raise ValueError("matcher supplied a foreign planning snapshot")
         if getattr(parcel, "origin_platform_id", None) != self.platform_id:
             raise ValueError("local planning request belongs to another platform")
-        options = self._planner.feasible_insertions(
-            parcel=parcel,
-            vehicles=own_planning_state.vehicles,
-            current_time_s=self._frame.current_time_s,
-        )
+
+    @staticmethod
+    def _sorted_options(
+        options: tuple[RouteInsertionOption, ...],
+    ) -> tuple[RouteInsertionOption, ...]:
         return tuple(
             sorted(
                 options,
@@ -1248,11 +1275,12 @@ class Environment:
         *,
         config: ExperimentConfig,
         prepared: PreparedEnvironment,
-        local_matchers: Mapping[str, LocalMatcher],
         release_sanitizers: Mapping[str, ReleaseSanitizer],
         cross_bidders: Mapping[str, CrossBidder],
         auctioneer: Auctioneer,
         serving_quality_provider: ServingQualityProvider,
+        local_matchers: Mapping[str, LocalMatcher] | None = None,
+        local_matcher: str | None = None,
     ) -> Environment:
         """Create mutable episode state from one prepared input set."""
         if (
@@ -1262,13 +1290,20 @@ class Environment:
             raise ValueError(
                 "prepared partition differs from configured platforms"
             )
+        if (local_matchers is None) == (local_matcher is None):
+            raise ValueError("provide a local matcher name or reference matchers")
+        selected_matchers = (
+            build_local_matchers(config.platform_ids, local_matcher)
+            if local_matcher is not None
+            else local_matchers
+        )
         return cls.from_components(
             config=config,
             road_network=prepared.road_network,
             station_index=prepared.station_index,
             platform_datasets=prepared.task_partition.datasets,
             initial_vehicles=prepared.initial_vehicles,
-            local_matchers=local_matchers,
+            local_matchers=selected_matchers,
             release_sanitizers=release_sanitizers,
             cross_bidders=cross_bidders,
             auctioneer=auctioneer,

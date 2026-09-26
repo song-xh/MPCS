@@ -14,36 +14,30 @@ from time import perf_counter
 import torch
 
 from mpcs.algorithms.PPO import PrivatePPOAgent
-from mpcs.algorithms.PPOState import (
-    ConfiguredLocalObservationEncoder,
-    _insertion_priority,
-)
+from mpcs.algorithms.PPOState import ConfiguredLocalObservationEncoder
 from mpcs.config import DatasetSplit, ExperimentConfig
 from mpcs.core.Domain import (
     JointStepResult,
-    LocalAssignmentProposal,
     ParcelAction,
     ParcelDecision,
     PlatformActionBatch,
-    PlatformLocalActionView,
     PlatformObservation,
-    PlatformPlanningSnapshot,
-    RoutePlanningService,
 )
 from mpcs.core.Framework import Environment, PreparedEnvironment
+from mpcs.core.LocalMatching import LOCAL_MATCHER_NAMES
 from mpcs.experiments.Progress import StageReporter, TerminalProgress
 from mpcs.experiments.Reporting import EventLog
 from mpcs.experiments.Runner import (
     AlgorithmRegistry,
-    AlgorithmSession,
     CrossMechanismFactory,
+    PoolPolicy,
     ScenarioProvider,
     builtin_algorithms,
     builtin_cross_mechanisms,
     prepared_stage_details,
     run_episode,
 )
-from mpcs.utility import normalize_decision_reward, policy_profit_delta
+from mpcs.utils.Economics import normalize_decision_reward, policy_profit_delta
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,35 +46,6 @@ class _PendingRelease:
     arrival_time_s: int
     deadline_s: int
     frame_time_s: int
-
-
-class _PPOLocalMatcher:
-    def __init__(self, platform_id: str) -> None:
-        self.platform_id = platform_id
-        self._frame_id = ""
-        self._proposals: dict[str, LocalAssignmentProposal] = {}
-
-    def set_proposals(
-        self, frame_id: str, proposals: tuple[LocalAssignmentProposal, ...]
-    ) -> None:
-        self._frame_id = frame_id
-        self._proposals = {proposal.parcel_id: proposal for proposal in proposals}
-
-    def plan(
-        self,
-        local_actions: PlatformLocalActionView,
-        own_shadow_state: PlatformPlanningSnapshot,
-        planning: RoutePlanningService,
-    ) -> tuple[LocalAssignmentProposal, ...]:
-        if (
-            local_actions.frame.decision_frame_id != self._frame_id
-            or own_shadow_state.platform_id != self.platform_id
-            or planning.platform_id != self.platform_id
-        ):
-            raise ValueError("PPO local plan belongs to another decision frame")
-        return tuple(
-            self._proposals[item.parcel_id] for item in local_actions.local_pickups
-        )
 
 
 class PPOPolicySession:
@@ -95,19 +60,18 @@ class PPOPolicySession:
         seed: int,
         explore: bool,
         cross_mechanism_factory: CrossMechanismFactory | None = None,
+        local_matcher: str = "greedy",
     ) -> None:
         self.config = config
         self.agents = agents
         self.explore = explore
+        self.local_matcher = local_matcher
         cross_factory = (
             builtin_cross_mechanisms()["paper"]
             if cross_mechanism_factory is None
             else cross_mechanism_factory
         )
         self._cross_kwargs = dict(cross_factory(config, prepared, seed))
-        self._matchers = {
-            platform_id: _PPOLocalMatcher(platform_id) for platform_id in agents
-        }
         self._encoders = {
             platform_id: ConfiguredLocalObservationEncoder(
                 platform_id=platform_id,
@@ -129,7 +93,7 @@ class PPOPolicySession:
     def environment_kwargs(self) -> dict[str, object]:
         return {
             **self._cross_kwargs,
-            "local_matchers": self._matchers,
+            "local_matcher": self.local_matcher,
         }
 
     @property
@@ -269,7 +233,6 @@ class PPOPolicySession:
         frame = observation.frame
         agent.begin_decision_batch(decision_frame_id=frame.decision_frame_id)
         decisions: list[ParcelDecision] = []
-        proposals: list[LocalAssignmentProposal] = []
         while batch.has_pending:
             pickup = batch.next_pickup()
             mask = batch.action_mask_for(
@@ -284,24 +247,9 @@ class PPOPolicySession:
                 decision_frame_id=frame.decision_frame_id,
                 explore=self.explore,
             )
-            if action is ParcelAction.LOCAL:
-                option = min(batch.options_for(pickup.parcel_id).values(), key=_insertion_priority)
-                proposals.append(
-                    LocalAssignmentProposal(
-                        proposal_token=(
-                            f"ppo:{frame.decision_frame_id}:{platform_id}:{pickup.parcel_id}"
-                        ),
-                        frame=frame,
-                        platform_id=platform_id,
-                        parcel_id=pickup.parcel_id,
-                        vehicle_id=option.vehicle_id,
-                        insertion=option,
-                    )
-                )
             decisions.append(ParcelDecision(parcel_id=pickup.parcel_id, action=action))
             batch.apply(pickup=pickup, action=action)
         agent.finish_decision_batch()
-        self._matchers[platform_id].set_proposals(frame.decision_frame_id, tuple(proposals))
         self._bpt[platform_id] = perf_counter() - started
         return PlatformActionBatch(
             frame=frame, platform_id=platform_id, decisions=tuple(decisions)
@@ -359,11 +307,12 @@ class _MixedPolicySession(PPOPolicySession):
         config: ExperimentConfig,
         prepared: PreparedEnvironment,
         agents: Mapping[str, PrivatePPOAgent],
-        opponents: Mapping[str, AlgorithmSession],
+        opponents: Mapping[str, PoolPolicy],
         *,
         seed: int,
         explore: bool,
         cross_mechanism_factory: CrossMechanismFactory | None = None,
+        local_matcher: str = "greedy",
     ) -> None:
         super().__init__(
             config,
@@ -372,20 +321,9 @@ class _MixedPolicySession(PPOPolicySession):
             seed=seed,
             explore=explore,
             cross_mechanism_factory=cross_mechanism_factory,
+            local_matcher=local_matcher,
         )
         self._opponents = opponents
-        self._opponent_matchers = {
-            platform_id: session.environment_kwargs()["local_matchers"][platform_id]
-            for platform_id, session in opponents.items()
-        }
-
-    def environment_kwargs(self) -> dict[str, object]:
-        kwargs = super().environment_kwargs()
-        kwargs["local_matchers"] = {
-            **self._matchers,
-            **self._opponent_matchers,
-        }
-        return kwargs
 
     def decide(
         self,
@@ -419,6 +357,7 @@ class PPOTrainer:
         opponents_by_platform: Mapping[str, str] | None = None,
         algorithm_registry: AlgorithmRegistry | None = None,
         cross_mechanism_factory: CrossMechanismFactory | None = None,
+        local_matcher: str = "greedy",
     ) -> None:
         self.config = config
         self.learner_platform_id = learner_platform_id
@@ -427,6 +366,9 @@ class PPOTrainer:
             builtin_algorithms() if algorithm_registry is None else algorithm_registry
         )
         self.cross_mechanism_factory = cross_mechanism_factory
+        if local_matcher not in LOCAL_MATCHER_NAMES:
+            raise ValueError(f"unknown local matcher: {local_matcher}")
+        self.local_matcher = local_matcher
         if learner_platform_id is None:
             if self.opponents_by_platform:
                 raise ValueError("opponents require a fixed PPO learner")
@@ -437,8 +379,8 @@ class PPOTrainer:
             if set(self.opponents_by_platform) != set(config.platform_ids) - {learner_platform_id}:
                 raise ValueError("each non-learning platform needs one opponent policy")
             for method in self.opponents_by_platform.values():
-                if method not in self.algorithm_registry.composable_names:
-                    raise ValueError(f"algorithm cannot join a mixed scenario: {method}")
+                if method not in self.algorithm_registry.pool_policy_names:
+                    raise ValueError(f"algorithm cannot select a mixed pool: {method}")
             agent_platforms = (learner_platform_id,)
         self.agents = {
             platform_id: PrivatePPOAgent.from_experiment_config(
@@ -625,9 +567,10 @@ class PPOTrainer:
                 seed=seed,
                 explore=explore,
                 cross_mechanism_factory=self.cross_mechanism_factory,
+                local_matcher=self.local_matcher,
             )
         opponents = {
-            platform_id: self.algorithm_registry.create(
+            platform_id: self.algorithm_registry.create_pool_policy(
                 method, self.config, prepared, seed
             )
             for platform_id, method in self.opponents_by_platform.items()
@@ -640,6 +583,7 @@ class PPOTrainer:
             seed=seed,
             explore=explore,
             cross_mechanism_factory=self.cross_mechanism_factory,
+            local_matcher=self.local_matcher,
         )
 
     def save_checkpoint(self, path: Path) -> None:
@@ -687,14 +631,14 @@ class PPOTrainer:
             plt.close(figure)
 
 
-def ppo_checkpoint_factory(checkpoint: Path):
+def ppo_checkpoint_factory(checkpoint: Path, *, local_matcher: str = "greedy"):
     """Create a frozen PPO session for the common comparison runner."""
     checkpoint = Path(checkpoint)
 
     def build(config: ExperimentConfig, prepared: PreparedEnvironment, seed: int):
-        trainer = PPOTrainer(config)
+        trainer = PPOTrainer(config, local_matcher=local_matcher)
         trainer.load_checkpoint(checkpoint)
-        return PPOPolicySession(config, prepared, trainer.agents, seed=seed, explore=False)
+        return trainer.make_session(prepared, seed=seed, explore=False)
 
     return build
 
@@ -705,6 +649,7 @@ def mixed_checkpoint_factory(
     opponents_by_platform: Mapping[str, str],
     algorithm_registry: AlgorithmRegistry,
     cross_mechanism_factory: CrossMechanismFactory | None = None,
+    local_matcher: str = "greedy",
 ):
     """Restore the learner while rebuilding the selected opponent policies."""
     checkpoint = Path(checkpoint)
@@ -716,6 +661,7 @@ def mixed_checkpoint_factory(
             opponents_by_platform=opponents_by_platform,
             algorithm_registry=algorithm_registry,
             cross_mechanism_factory=cross_mechanism_factory,
+            local_matcher=local_matcher,
         )
         trainer.load_checkpoint(checkpoint)
         return trainer.make_session(prepared, seed=seed, explore=False)
