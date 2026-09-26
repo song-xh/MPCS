@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from mpcs.algorithms.baseline import BaselineMethod
 from mpcs.config import DatasetSplit, ExperimentConfig
 from .Presets import BUILTIN_DATASETS, dataset_preset
 from .Runner import (
@@ -163,7 +164,14 @@ class MPCSRunner:
             raise ValueError("bundled Shanghai parcels are available for the test split")
         if "mixed" in self.algorithms.names:
             raise ValueError("mixed is reserved for the trained scenario")
-        opponents = dict(opponents_by_platform)
+        opponents = {}
+        for platform_id, method in opponents_by_platform.items():
+            if method not in self.algorithms.names:
+                try:
+                    method = BaselineMethod.parse(method).value
+                except ValueError:
+                    pass
+            opponents[platform_id] = method
         trainer = PPOTrainer(
             config,
             device=device,
