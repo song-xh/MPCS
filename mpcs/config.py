@@ -354,12 +354,12 @@ class DatasetConfig:
             if type(self.platform_source_files) is not tuple:
                 raise ValueError("platform source files must be a tuple")
             platform_ids: list[str] = []
-            # A source file may intentionally be shared by platforms in the same
-            # modulo group (for example P1/P5/P9/P13).  Split ownership remains
-            # disjoint; platform-level exclusivity is enforced while loading the
-            # shared stream rather than by rejecting the manifest here.
+            # Each platform owns distinct source days within a split.
             mapped_sources_by_split: dict[DatasetSplit, set[str]] = {
                 split: set() for split in DatasetSplit
+            }
+            owners_by_split: dict[DatasetSplit, dict[str, str]] = {
+                split: {} for split in DatasetSplit
             }
             for mapping in self.platform_source_files:
                 if not isinstance(mapping, PlatformSourceFiles):
@@ -384,6 +384,17 @@ class DatasetConfig:
                                 "platform source mapping references a file outside "
                                 f"the {split.value} split: {source_file}"
                             )
+                        previous_owner = owners_by_split[split].get(source_file)
+                        if (
+                            self.adapter == "parcel_v2"
+                            and previous_owner is not None
+                            and previous_owner != mapping.platform_id
+                        ):
+                            raise ValueError(
+                                f"{split.value} source day {source_file} belongs to "
+                                f"both {previous_owner} and {mapping.platform_id}"
+                            )
+                        owners_by_split[split][source_file] = mapping.platform_id
                         mapped_sources_by_split[split].add(source_file)
             if len(set(platform_ids)) != len(platform_ids):
                 raise ValueError("platform source mapping platform IDs must be unique")
@@ -498,16 +509,6 @@ class DatasetConfig:
             if mapping.platform_id == platform_id:
                 return mapping.source_files_for(split)
 
-        # Chengdu experiments use four source groups.  Additional platforms
-        # reuse the corresponding group by index, while the loader performs a
-        # seeded, mutually-exclusive allocation from the shared stream.
-        if self.adapter == "parcel_v2" and platform_id.startswith("P"):
-            suffix = platform_id[1:]
-            if suffix.isdigit() and int(suffix) > 0:
-                base_platform_id = f"P{(int(suffix) - 1) % 4 + 1}"
-                for mapping in self.platform_source_files:
-                    if mapping.platform_id == base_platform_id:
-                        return mapping.source_files_for(split)
         raise KeyError(f"unknown platform source mapping: {platform_id}")
 
     @staticmethod
@@ -1923,6 +1924,76 @@ def load_experiment_config(path: str | Path) -> LoadedExperimentConfig:
         source_path=source_path,
         source_sha256=sha256(source_bytes).hexdigest(),
     )
+
+
+def configure_platform_days(
+    config: ExperimentConfig,
+    platform_days: Mapping[str, Mapping[str, str | list[str]]],
+) -> ExperimentConfig:
+    """Assign parcel-v2 source days to each platform and dataset split."""
+
+    if config.dataset.adapter != "parcel_v2":
+        raise ValueError("platform days require a parcel-v2 dataset")
+    if set(platform_days) != set(config.platform_ids):
+        raise ValueError("platform days must cover every configured platform")
+
+    source_files_by_split: dict[DatasetSplit, list[str]] = {
+        split: [] for split in DatasetSplit
+    }
+    mappings: list[PlatformSourceFiles] = []
+    expected_splits = {split.value for split in DatasetSplit}
+    for platform_id in config.platform_ids:
+        days_by_split = platform_days[platform_id]
+        if set(days_by_split) != expected_splits:
+            raise ValueError(
+                f"platform days for {platform_id} must contain train, validation, and test"
+            )
+        selected: dict[DatasetSplit, tuple[str, ...]] = {}
+        for split in DatasetSplit:
+            days = days_by_split[split.value]
+            if isinstance(days, str):
+                days = [days]
+            if not isinstance(days, (list, tuple)) or not days:
+                raise ValueError(f"{platform_id}/{split.value} needs at least one day")
+            source_files: list[str] = []
+            for day in days:
+                if not isinstance(day, str):
+                    raise ValueError(f"{platform_id}/{split.value} days must be strings")
+                source_file = day if day.startswith("order_") else f"order_{day}"
+                if len(source_file) != 14 or not source_file[6:].isdigit():
+                    raise ValueError(
+                        f"{platform_id}/{split.value} needs YYYYMMDD or order_YYYYMMDD"
+                    )
+                source_files.append(source_file)
+            selected[split] = tuple(source_files)
+            source_files_by_split[split].extend(source_files)
+        mappings.append(
+            PlatformSourceFiles(
+                platform_id=platform_id,
+                train_source_files=selected[DatasetSplit.TRAIN],
+                validation_source_files=selected[DatasetSplit.VALIDATION],
+                test_source_files=selected[DatasetSplit.TEST],
+            )
+        )
+
+    updated = replace(
+        config,
+        dataset=replace(
+            config.dataset,
+            train_source_files=tuple(source_files_by_split[DatasetSplit.TRAIN]),
+            validation_source_files=tuple(
+                source_files_by_split[DatasetSplit.VALIDATION]
+            ),
+            test_source_files=tuple(source_files_by_split[DatasetSplit.TEST]),
+            platform_source_files=tuple(mappings),
+        ),
+        stations=replace(
+            config.stations,
+            reference_source_file=mappings[0].train_source_files[0],
+        ),
+    )
+    updated.validate()
+    return updated
 
 
 def config_for_data_profile(
