@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from importlib import import_module
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from mpcs.config import DatasetSplit, ExperimentConfig
 from .Presets import BUILTIN_DATASETS, dataset_preset
@@ -16,6 +17,9 @@ from .Runner import (
     ScenarioProvider,
     builtin_algorithms,
 )
+
+if TYPE_CHECKING:
+    from mpcs.algorithms.PPOTraining import PPOTrainer
 
 
 DatasetFactory = Callable[[Path], ExperimentConfig]
@@ -53,21 +57,31 @@ class MPCSRunner:
         return (*BUILTIN_DATASETS, *self._datasets)
 
     def resolve_dataset(
-        self, dataset: str | ExperimentConfig, *, output_dir: Path
+        self,
+        dataset: str | ExperimentConfig,
+        *,
+        output_dir: Path,
+        platform_count: int | None = None,
     ) -> tuple[ExperimentConfig, ScenarioProvider | None]:
         if isinstance(dataset, ExperimentConfig):
+            if platform_count is not None:
+                raise ValueError("platform count is already set by the experiment config")
             registration = self._datasets.get(dataset.dataset.name)
             if dataset.dataset.adapter == "external" and registration is None:
                 raise ValueError("external dataset requires a registered scenario provider")
             return dataset, None if registration is None else registration[1]
         registration = self._datasets.get(dataset)
         if registration is not None:
+            if platform_count is not None:
+                raise ValueError("platform count is set by the registered dataset")
             factory, provider = registration
             config = factory(Path(output_dir))
             if config.dataset.name != dataset:
                 raise ValueError("dataset factory name differs from its registration")
             return config, provider
-        return dataset_preset(dataset, output_root=output_dir), None
+        return dataset_preset(
+            dataset, output_root=output_dir, platform_count=platform_count
+        ), None
 
     def run(
         self,
@@ -105,8 +119,104 @@ class MPCSRunner:
             max(config.training.total_episodes, len(config.platform_ids))
             if episodes is None else episodes
         )
-        road_artifacts = output_dir / "road-cache"
         trainer = PPOTrainer(config, device=device)
+        return self._run_training(
+            config=config,
+            provider=provider,
+            trainer=trainer,
+            output_dir=output_dir,
+            episode_count=episode_count,
+            methods=selected_methods,
+            trained_method="ppo",
+            checkpoint_factory=ppo_checkpoint_factory,
+            seed=seed,
+            show_progress=show_progress,
+            tensorboard=tensorboard,
+            validation_split=validation_split,
+            comparison_split=comparison_split,
+        )
+
+    def run_mixed(
+        self,
+        *,
+        dataset: str | ExperimentConfig = "synthetic",
+        output_dir: Path,
+        learner_platform_id: str,
+        opponents_by_platform: Mapping[str, str],
+        platform_count: int | None = None,
+        episodes: int | None = None,
+        seed: int | None = None,
+        device: str = "cpu",
+        show_progress: bool = True,
+        tensorboard: bool = False,
+        validation_split: DatasetSplit = DatasetSplit.VALIDATION,
+        comparison_split: DatasetSplit = DatasetSplit.TEST,
+    ) -> dict[str, object]:
+        """Train one PPO platform against selected local opponent policies."""
+        from mpcs.algorithms.PPOTraining import PPOTrainer, mixed_checkpoint_factory
+
+        output_dir = Path(output_dir)
+        config, provider = self.resolve_dataset(
+            dataset, output_dir=output_dir, platform_count=platform_count
+        )
+        if provider is None and config.dataset.name in {"shanghai", "shanghai16"}:
+            raise ValueError("bundled Shanghai parcels are available for the test split")
+        if "mixed" in self.algorithms.names:
+            raise ValueError("mixed is reserved for the trained scenario")
+        opponents = dict(opponents_by_platform)
+        trainer = PPOTrainer(
+            config,
+            device=device,
+            learner_platform_id=learner_platform_id,
+            opponents_by_platform=opponents,
+            algorithm_registry=self.algorithms,
+        )
+        return self._run_training(
+            config=config,
+            provider=provider,
+            trainer=trainer,
+            output_dir=output_dir,
+            episode_count=config.training.total_episodes if episodes is None else episodes,
+            methods=("mixed",),
+            trained_method="mixed",
+            checkpoint_factory=lambda checkpoint: mixed_checkpoint_factory(
+                checkpoint, learner_platform_id, opponents, self.algorithms
+            ),
+            seed=seed,
+            show_progress=show_progress,
+            tensorboard=tensorboard,
+            validation_split=validation_split,
+            comparison_split=comparison_split,
+            summary_fields={
+                "learner_platform_id": learner_platform_id,
+                "platform_policies": {
+                    platform_id: (
+                        "ppo" if platform_id == learner_platform_id else opponents[platform_id]
+                    )
+                    for platform_id in config.platform_ids
+                },
+            },
+        )
+
+    def _run_training(
+        self,
+        *,
+        config: ExperimentConfig,
+        provider: ScenarioProvider | None,
+        trainer: PPOTrainer,
+        output_dir: Path,
+        episode_count: int,
+        methods: Sequence[str],
+        trained_method: str,
+        checkpoint_factory: Callable[[Path], AlgorithmFactory],
+        seed: int | None,
+        show_progress: bool,
+        tensorboard: bool,
+        validation_split: DatasetSplit,
+        comparison_split: DatasetSplit,
+        summary_fields: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        road_artifacts = output_dir / "road-cache"
         records = trainer.train(
             episodes=episode_count,
             output_dir=output_dir / "training",
@@ -128,10 +238,10 @@ class MPCSRunner:
             road_artifact_dir=road_artifacts,
         )
         registry = self.algorithms.copy()
-        registry.register("ppo", ppo_checkpoint_factory(checkpoint))
+        registry.register(trained_method, checkpoint_factory(checkpoint))
         comparison = ExperimentRunner(registry).run(
             config,
-            methods=selected_methods,
+            methods=methods,
             split=comparison_split,
             output_dir=output_dir / "comparison",
             seed=seed,
@@ -149,6 +259,7 @@ class MPCSRunner:
             },
             "validation": validation,
             "comparison": comparison,
+            **(summary_fields or {}),
         }
         (output_dir / "summary.json").write_text(
             json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
