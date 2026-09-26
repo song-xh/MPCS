@@ -2225,6 +2225,7 @@ def smoke_experiment_config(
 def synthetic_experiment_config(
     *,
     output_root: Path | None = None,
+    platform_count: int = 2,
 ) -> ExperimentConfig:
     """Return a bounded no-input profile for training/CI examples."""
 
@@ -2255,25 +2256,24 @@ def synthetic_experiment_config(
             name="synthetic",
             adapter="synthetic",
             schema_name="synthetic_order_v1",
-            train_source_files=("synthetic-train-p1", "synthetic-train-p2"),
-            validation_source_files=(
-                "synthetic-validation-p1",
-                "synthetic-validation-p2",
+            train_source_files=tuple(
+                f"synthetic-train-p{index}" for index in range(1, platform_count + 1)
             ),
-            test_source_files=("synthetic-test-p1", "synthetic-test-p2"),
-            platform_source_files=(
+            validation_source_files=tuple(
+                f"synthetic-validation-p{index}"
+                for index in range(1, platform_count + 1)
+            ),
+            test_source_files=tuple(
+                f"synthetic-test-p{index}" for index in range(1, platform_count + 1)
+            ),
+            platform_source_files=tuple(
                 PlatformSourceFiles(
-                    platform_id="P1",
-                    train_source_files=("synthetic-train-p1",),
-                    validation_source_files=("synthetic-validation-p1",),
-                    test_source_files=("synthetic-test-p1",),
-                ),
-                PlatformSourceFiles(
-                    platform_id="P2",
-                    train_source_files=("synthetic-train-p2",),
-                    validation_source_files=("synthetic-validation-p2",),
-                    test_source_files=("synthetic-test-p2",),
-                ),
+                    platform_id=f"P{index}",
+                    train_source_files=(f"synthetic-train-p{index}",),
+                    validation_source_files=(f"synthetic-validation-p{index}",),
+                    test_source_files=(f"synthetic-test-p{index}",),
+                )
+                for index in range(1, platform_count + 1)
             ),
             max_source_records=100,
             pickup_count_per_platform=2,
@@ -2301,7 +2301,7 @@ def synthetic_experiment_config(
         ),
         simulation=replace(
             base.simulation,
-            platform_num=2,
+            platform_num=platform_count,
             start_time_s=0,
             end_time_s=180,
             step_size_s=30,

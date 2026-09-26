@@ -31,10 +31,17 @@ def _output_paths(config: ExperimentConfig, root: Path) -> ExperimentConfig:
     )
 
 
-def dataset_preset(name: str, *, output_root: Path) -> ExperimentConfig:
+def dataset_preset(
+    name: str, *, output_root: Path, platform_count: int | None = None
+) -> ExperimentConfig:
     """Return a complete config; real datasets use their copied local paths."""
     if name == "synthetic":
-        return synthetic_experiment_config(output_root=output_root)
+        return synthetic_experiment_config(
+            output_root=output_root,
+            platform_count=2 if platform_count is None else platform_count,
+        )
+    if platform_count is not None:
+        raise ValueError("platform count override is supported by synthetic only")
 
     base = _output_paths(ExperimentConfig(), output_root)
     if name == "chengdu":
