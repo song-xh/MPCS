@@ -9,13 +9,20 @@ import csv
 import json
 from math import ceil, fsum
 from pathlib import Path
-from time import monotonic
+from time import monotonic, perf_counter
 from typing import Protocol, runtime_checkable
 
 from mpcs.algorithms.baseline import BaselineMethod, build_baseline_components
 from mpcs.algorithms.baseline.Greedy import build_neutral_greedy_context
+from mpcs.algorithms.baseline.Greedy import GreedyLocalMatcher
 from mpcs.config import DatasetSplit, ExperimentConfig
-from mpcs.core.Domain import JointStepResult, PlatformActionBatch, PlatformObservation
+from mpcs.core.Domain import (
+    JointStepResult,
+    ParcelAction,
+    ParcelDecision,
+    PlatformActionBatch,
+    PlatformObservation,
+)
 from mpcs.core.Framework import Environment, PreparedEnvironment
 from .Progress import StageReporter, TerminalProgress
 from .Reporting import ArtifactWriter, EventLog
@@ -57,6 +64,9 @@ AlgorithmFactory = Callable[
     [ExperimentConfig, PreparedEnvironment, int], AlgorithmSession
 ]
 ScenarioProvider = Callable[[ExperimentConfig, DatasetSplit], PreparedEnvironment]
+DecisionPolicy = Callable[
+    [ExperimentConfig, str, PlatformObservation], Mapping[str, ParcelAction]
+]
 
 
 class AlgorithmRegistry:
@@ -69,6 +79,16 @@ class AlgorithmRegistry:
         if not name or name in self._factories:
             raise ValueError(f"algorithm name is empty or already registered: {name!r}")
         self._factories[name] = factory
+
+    def register_policy(self, name: str, policy: DecisionPolicy) -> None:
+        """Register a decision-only policy with standard matching and auction."""
+
+        def build(
+            config: ExperimentConfig, prepared: PreparedEnvironment, seed: int
+        ) -> AlgorithmSession:
+            return _DecisionPolicySession(config, prepared, seed, policy)
+
+        self.register(name, build)
 
     def create(
         self,
@@ -108,6 +128,54 @@ class _BaselineSession:
     @property
     def batch_processing_time_s_by_platform(self) -> Mapping[str, float]:
         return self.components.batch_processing_time_s_by_platform
+
+
+class _DecisionPolicySession:
+    def __init__(
+        self,
+        config: ExperimentConfig,
+        prepared: PreparedEnvironment,
+        seed: int,
+        policy: DecisionPolicy,
+    ) -> None:
+        self._policy = policy
+        self._defaults = build_baseline_components(
+            "localsum", config, prepared, random_seed=seed
+        )
+        self._matchers = {
+            platform_id: GreedyLocalMatcher(platform_id=platform_id)
+            for platform_id in config.platform_ids
+        }
+        self._times = {platform_id: 0.0 for platform_id in config.platform_ids}
+
+    def environment_kwargs(self) -> dict[str, object]:
+        return {
+            **self._defaults.environment_kwargs(),
+            "local_matchers": self._matchers,
+        }
+
+    def decide(
+        self,
+        platform_id: str,
+        observation: PlatformObservation,
+        config: ExperimentConfig,
+    ) -> PlatformActionBatch:
+        started = perf_counter()
+        selected = self._policy(config, platform_id, observation)
+        decisions = tuple(
+            ParcelDecision(parcel_id=pickup.parcel_id, action=selected[pickup.parcel_id])
+            for pickup in observation.waiting_pickups
+        )
+        self._times[platform_id] = perf_counter() - started
+        return PlatformActionBatch(
+            frame=observation.frame,
+            platform_id=platform_id,
+            decisions=decisions,
+        )
+
+    @property
+    def batch_processing_time_s_by_platform(self) -> Mapping[str, float]:
+        return self._times
 
 
 def builtin_algorithms() -> AlgorithmRegistry:

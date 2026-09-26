@@ -2,6 +2,24 @@
 
 ## Algorithm session
 
+For an algorithm that only chooses `LOCAL`, `WAIT`, or `RELEASE`, register one decision function. The runner supplies the exact greedy local matcher, regional release bidder, auctioneer, and serving-quality provider:
+
+```python
+from mpcs.core.Domain import ParcelAction
+from mpcs.experiments import builtin_algorithms
+
+def my_decisions(config, platform_id, observation):
+    return {
+        pickup.parcel_id: ParcelAction.WAIT
+        for pickup in observation.waiting_pickups
+    }
+
+registry = builtin_algorithms()
+registry.register_policy("my-policy", my_decisions)
+```
+
+The returned mapping must contain one action for each waiting pickup. Route or cross-platform mechanism research can use the full session interface below.
+
 Register an algorithm factory with `AlgorithmRegistry.register(name, factory)`. The factory receives `(config, prepared, seed)` and returns a session with three members:
 
 - `environment_kwargs()` supplies per-platform local matchers, release sanitizers, cross bidders, one auctioneer, and one serving-quality provider. These are the simulation's existing service protocols in `mpcs/core/Domain.py`.
