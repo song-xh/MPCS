@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mpcs.algorithms.baseline import BaselineMethod
-from mpcs.config import DatasetSplit, ExperimentConfig
+from mpcs.config import DatasetSplit, ExperimentConfig, configure_platform_days
 from .Presets import BUILTIN_DATASETS, dataset_preset
+from .Progress import TerminalProgress
 from .Runner import (
     AlgorithmFactory,
     CrossMechanismFactory,
@@ -171,6 +172,7 @@ class MPCSRunner:
         learner_platform_id: str,
         opponents_by_platform: Mapping[str, str],
         cross_mechanism: str = "paper",
+        platform_days: Mapping[str, Mapping[str, str | list[str]]] | None = None,
         platform_count: int | None = None,
         episodes: int | None = None,
         seed: int | None = None,
@@ -187,6 +189,8 @@ class MPCSRunner:
         config, provider = self.resolve_dataset(
             dataset, output_dir=output_dir, platform_count=platform_count
         )
+        if platform_days is not None:
+            config = configure_platform_days(config, platform_days)
         if provider is None and config.dataset.name in {"shanghai", "shanghai16"}:
             raise ValueError("bundled Shanghai parcels are available for the test split")
         if "mixed" in self.algorithms.names:
@@ -211,6 +215,15 @@ class MPCSRunner:
             algorithm_registry=self.algorithms,
             cross_mechanism_factory=cross_factory,
         )
+        source_fields = {}
+        if config.dataset.adapter == "parcel_v2":
+            source_fields["platform_sources"] = {
+                platform_id: {
+                    split.value: config.dataset.source_files_for_platform(platform_id, split)
+                    for split in DatasetSplit
+                }
+                for platform_id in config.platform_ids
+            }
         return self._run_training(
             config=config,
             provider=provider,
@@ -234,6 +247,7 @@ class MPCSRunner:
             summary_fields={
                 "learner_platform_id": learner_platform_id,
                 "cross_mechanism": cross_mechanism,
+                **source_fields,
                 "platform_policies": {
                     platform_id: (
                         "ppo" if platform_id == learner_platform_id else opponents[platform_id]
@@ -262,39 +276,43 @@ class MPCSRunner:
         summary_fields: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         road_artifacts = output_dir / "road-cache"
-        records = trainer.train(
-            episodes=episode_count,
-            output_dir=output_dir / "training",
-            seed=seed,
-            tensorboard=tensorboard,
-            show_progress=show_progress,
-            scenario_provider=provider,
-            road_artifact_dir=road_artifacts,
-        )
-        checkpoint = (
-            output_dir / "training" / "checkpoints"
-            / f"episode-{episode_count:06d}.pt"
-        )
-        validation = trainer.evaluate(
-            split=validation_split,
-            seed=seed,
-            output_dir=output_dir / "validation",
-            scenario_provider=provider,
-            road_artifact_dir=road_artifacts,
-        )
-        registry = self.algorithms.copy()
-        registry.register(trained_method, checkpoint_factory(checkpoint))
-        comparison = ExperimentRunner(registry).run(
-            config,
-            methods=methods,
-            split=comparison_split,
-            output_dir=output_dir / "comparison",
-            seed=seed,
-            show_progress=show_progress,
-            tensorboard=tensorboard,
-            road_artifact_dir=road_artifacts,
-            scenario_provider=provider,
-        )
+        with TerminalProgress(enabled=show_progress) as terminal:
+            records = trainer.train(
+                episodes=episode_count,
+                output_dir=output_dir / "training",
+                seed=seed,
+                tensorboard=tensorboard,
+                show_progress=show_progress,
+                scenario_provider=provider,
+                road_artifact_dir=road_artifacts,
+                terminal=terminal,
+            )
+            checkpoint = (
+                output_dir / "training" / "checkpoints"
+                / f"episode-{episode_count:06d}.pt"
+            )
+            validation = trainer.evaluate(
+                split=validation_split,
+                seed=seed,
+                output_dir=output_dir / "validation",
+                scenario_provider=provider,
+                road_artifact_dir=road_artifacts,
+                terminal=terminal,
+            )
+            registry = self.algorithms.copy()
+            registry.register(trained_method, checkpoint_factory(checkpoint))
+            comparison = ExperimentRunner(registry).run(
+                config,
+                methods=methods,
+                split=comparison_split,
+                output_dir=output_dir / "comparison",
+                seed=seed,
+                show_progress=show_progress,
+                tensorboard=tensorboard,
+                road_artifact_dir=road_artifacts,
+                scenario_provider=provider,
+                terminal=terminal,
+            )
         summary: dict[str, object] = {
             "dataset": config.dataset.name,
             "training": {

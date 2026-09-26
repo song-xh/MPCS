@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import asdict, dataclass
 import json
+from collections.abc import Callable, Mapping
+from contextlib import nullcontext
+from dataclasses import asdict, dataclass
 from math import fsum
 from pathlib import Path
 from time import perf_counter
-from typing import Mapping
 
 import torch
 
 from mpcs.algorithms.PPO import PrivatePPOAgent
-from mpcs.algorithms.PPOState import ConfiguredLocalObservationEncoder, _insertion_priority
+from mpcs.algorithms.PPOState import (
+    ConfiguredLocalObservationEncoder,
+    _insertion_priority,
+)
 from mpcs.config import DatasetSplit, ExperimentConfig
 from mpcs.core.Domain import (
+    JointStepResult,
     LocalAssignmentProposal,
     ParcelAction,
     ParcelDecision,
@@ -23,12 +28,11 @@ from mpcs.core.Domain import (
     PlatformLocalActionView,
     PlatformObservation,
     PlatformPlanningSnapshot,
-    JointStepResult,
     RoutePlanningService,
 )
 from mpcs.core.Framework import Environment, PreparedEnvironment
-from mpcs.utility import normalize_decision_reward, policy_profit_delta
-from mpcs.experiments.Progress import TerminalProgress
+from mpcs.experiments.Progress import StageReporter, TerminalProgress
+from mpcs.experiments.Reporting import EventLog
 from mpcs.experiments.Runner import (
     AlgorithmRegistry,
     AlgorithmSession,
@@ -36,8 +40,10 @@ from mpcs.experiments.Runner import (
     ScenarioProvider,
     builtin_algorithms,
     builtin_cross_mechanisms,
+    prepared_stage_details,
     run_episode,
 )
+from mpcs.utility import normalize_decision_reward, policy_profit_delta
 
 
 @dataclass(frozen=True, slots=True)
@@ -451,6 +457,7 @@ class PPOTrainer:
         seed: int | None = None,
         tensorboard: bool = True,
         show_progress: bool = True,
+        terminal: TerminalProgress | None = None,
         scenario_provider: ScenarioProvider | None = None,
         road_artifact_dir: Path | None = None,
     ) -> list[dict[str, object]]:
@@ -459,54 +466,72 @@ class PPOTrainer:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         run_seed = self.config.master_seed if seed is None else seed
-        prepared = (
-            Environment.prepare_environment_split(
-                self.config,
-                DatasetSplit.TRAIN,
-                road_artifact_dir=road_artifact_dir or output_dir / "road-cache",
-            )
-            if scenario_provider is None
-            else scenario_provider(self.config, DatasetSplit.TRAIN)
-        )
-        from torch.utils.tensorboard import SummaryWriter
-
-        writer = SummaryWriter(str(output_dir / "tensorboard")) if tensorboard else None
         records: list[dict[str, object]] = []
-        try:
-            with TerminalProgress(enabled=show_progress) as terminal:
-                for episode in range(1, episodes + 1):
-                    learner = tuple(self.agents)[(episode - 1) % len(self.agents)]
-                    for platform_id, agent in self.agents.items():
-                        agent.start_episode(learning=platform_id == learner)
-                    record = self._run_episode(prepared, seed=run_seed + episode, explore=True)
-                    updates: dict[str, dict[str, object]] = {}
-                    for platform_id, agent in self.agents.items():
-                        stats = agent.finish_episode(
-                            force_update=episode + len(self.agents) > episodes
+        progress = nullcontext(terminal) if terminal is not None else TerminalProgress(enabled=show_progress)
+        with progress as display, EventLog(output_dir / "events.jsonl") as events:
+            reporter = StageReporter(events.event, display, phase="train")
+            with reporter.stage("scenario_prepare", split=DatasetSplit.TRAIN.value) as details:
+                prepared = (
+                    Environment.prepare_environment_split(
+                        self.config,
+                        DatasetSplit.TRAIN,
+                        road_artifact_dir=road_artifact_dir or output_dir / "road-cache",
+                        stage_reporter=reporter,
+                    )
+                    if scenario_provider is None
+                    else scenario_provider(self.config, DatasetSplit.TRAIN)
+                )
+                details.update(prepared_stage_details(prepared))
+            from torch.utils.tensorboard import SummaryWriter
+
+            writer = SummaryWriter(str(output_dir / "tensorboard")) if tensorboard else None
+            try:
+                with reporter.stage("training", episodes=episodes) as details:
+                    for episode in range(1, episodes + 1):
+                        learner = tuple(self.agents)[(episode - 1) % len(self.agents)]
+                        for platform_id, agent in self.agents.items():
+                            agent.start_episode(learning=platform_id == learner)
+                        record = self._run_episode(
+                            prepared,
+                            seed=run_seed + episode,
+                            explore=True,
+                            on_batch=lambda frame: display.batch("train/frame", frame),
+                            stage_reporter=reporter if episode == 1 else None,
                         )
-                        if stats is not None:
-                            updates[platform_id] = asdict(stats)
-                    record.update({"episode": episode, "learner": learner, "updates": updates})
-                    records.append(record)
-                    terminal.batch("ppo-train", {
-                        "batch": episode,
-                        "assigned": record["assigned_pickups"],
-                        "total": record["total_pickups"],
-                        "profit": record["operating_profit"],
-                        "assignment_rate": record["assignment_rate"],
-                    })
-                    if writer is not None:
-                        writer.add_scalar("train/operating_profit", record["operating_profit"], episode)
-                        writer.add_scalar("train/assignment_rate", record["assignment_rate"], episode)
-                        for platform_id, stats in updates.items():
-                            for key in ("actor_loss", "critic_loss", "approx_kl", "entropy"):
-                                writer.add_scalar(f"ppo/{platform_id}/{key}", stats[key], episode)
-                    if episode % self.config.training.checkpoint_interval_episodes == 0 or episode == episodes:
-                        self.save_checkpoint(output_dir / "checkpoints" / f"episode-{episode:06d}.pt")
-        finally:
-            prepared.road_network.close()
-            if writer is not None:
-                writer.close()
+                        updates: dict[str, dict[str, object]] = {}
+                        for platform_id, agent in self.agents.items():
+                            stats = agent.finish_episode(
+                                force_update=episode + len(self.agents) > episodes
+                            )
+                            if stats is not None:
+                                updates[platform_id] = asdict(stats)
+                        record.update({"episode": episode, "learner": learner, "updates": updates})
+                        records.append(record)
+                        display.batch("train/episode", {
+                            "batch": episode,
+                            "assigned": record["assigned_pickups"],
+                            "total": record["total_pickups"],
+                            "profit": record["operating_profit"],
+                            "assignment_rate": record["assignment_rate"],
+                        })
+                        if writer is not None:
+                            writer.add_scalar("train/operating_profit", record["operating_profit"], episode)
+                            writer.add_scalar("train/assignment_rate", record["assignment_rate"], episode)
+                            for platform_id, stats in updates.items():
+                                for key in ("actor_loss", "critic_loss", "approx_kl", "entropy"):
+                                    writer.add_scalar(f"ppo/{platform_id}/{key}", stats[key], episode)
+                        if episode % self.config.training.checkpoint_interval_episodes == 0 or episode == episodes:
+                            self.save_checkpoint(output_dir / "checkpoints" / f"episode-{episode:06d}.pt")
+                    details.update(
+                        completed_episodes=len(records),
+                        assigned=records[-1]["assigned_pickups"],
+                        total=records[-1]["total_pickups"],
+                        operating_profit=records[-1]["operating_profit"],
+                    )
+            finally:
+                prepared.road_network.close()
+                if writer is not None:
+                    writer.close()
         self._write_training_artifacts(records, output_dir)
         return records
 
@@ -516,33 +541,50 @@ class PPOTrainer:
         split: DatasetSplit = DatasetSplit.TEST,
         seed: int | None = None,
         output_dir: Path,
+        show_progress: bool = True,
+        terminal: TerminalProgress | None = None,
         scenario_provider: ScenarioProvider | None = None,
         road_artifact_dir: Path | None = None,
     ) -> dict[str, object]:
         """Run one deterministic episode with frozen platform policies."""
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        prepared = (
-            Environment.prepare_environment_split(
-                self.config,
-                split,
-                road_artifact_dir=road_artifact_dir or output_dir / "road-cache",
-            )
-            if scenario_provider is None
-            else scenario_provider(self.config, split)
-        )
-        try:
-            for agent in self.agents.values():
-                agent.start_episode(learning=False)
-            result = self._run_episode(
-                prepared,
-                seed=self.config.master_seed if seed is None else seed,
-                explore=False,
-            )
-            for agent in self.agents.values():
-                agent.finish_episode()
-        finally:
-            prepared.road_network.close()
+        progress = nullcontext(terminal) if terminal is not None else TerminalProgress(enabled=show_progress)
+        with progress as display, EventLog(output_dir / "events.jsonl") as events:
+            reporter = StageReporter(events.event, display, phase=split.value)
+            with reporter.stage("scenario_prepare", split=split.value) as details:
+                prepared = (
+                    Environment.prepare_environment_split(
+                        self.config,
+                        split,
+                        road_artifact_dir=road_artifact_dir or output_dir / "road-cache",
+                        stage_reporter=reporter,
+                    )
+                    if scenario_provider is None
+                    else scenario_provider(self.config, split)
+                )
+                details.update(prepared_stage_details(prepared))
+            try:
+                with reporter.stage("evaluation", split=split.value) as details:
+                    for agent in self.agents.values():
+                        agent.start_episode(learning=False)
+                    result = self._run_episode(
+                        prepared,
+                        seed=self.config.master_seed if seed is None else seed,
+                        explore=False,
+                        on_batch=lambda frame: display.batch(f"{split.value}/frame", frame),
+                        stage_reporter=reporter,
+                    )
+                    for agent in self.agents.values():
+                        agent.finish_episode()
+                    details.update(
+                        batches=result["batches"],
+                        assigned=result["assigned_pickups"],
+                        total=result["total_pickups"],
+                        operating_profit=result["operating_profit"],
+                    )
+            finally:
+                prepared.road_network.close()
         summary = {"split": split.value, **result}
         (output_dir / "summary.json").write_text(
             json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8"
@@ -550,7 +592,13 @@ class PPOTrainer:
         return summary
 
     def _run_episode(
-        self, prepared: PreparedEnvironment, *, seed: int, explore: bool
+        self,
+        prepared: PreparedEnvironment,
+        *,
+        seed: int,
+        explore: bool,
+        on_batch: Callable[[Mapping[str, int | float]], None] | None = None,
+        stage_reporter: StageReporter | None = None,
     ) -> dict[str, object]:
         summary, session = run_episode(
             self.config,
@@ -561,6 +609,8 @@ class PPOTrainer:
             seed=seed,
             method="mixed" if self.learner_platform_id is not None else "ppo",
             manage_session=False,
+            on_batch=on_batch,
+            stage_reporter=stage_reporter,
         )
         return {**summary, "reward_by_platform": dict(session.reward_by_platform)}
 

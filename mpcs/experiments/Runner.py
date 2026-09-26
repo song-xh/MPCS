@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 import csv
 import json
@@ -71,6 +72,22 @@ ScenarioProvider = Callable[[ExperimentConfig, DatasetSplit], PreparedEnvironmen
 DecisionPolicy = Callable[
     [ExperimentConfig, str, PlatformObservation], Mapping[str, ParcelAction]
 ]
+
+
+def prepared_stage_details(prepared: PreparedEnvironment) -> dict[str, int]:
+    """Counts shown after preparing or constructing a scenario."""
+    datasets = prepared.task_partition.datasets.values()
+    return {
+        "graph_nodes": len(prepared.road_network.node_ids),
+        "routing_edges": prepared.road_network.edge_count,
+        "platforms": len(prepared.initial_vehicles),
+        "pickups": sum(len(item.pickup_parcels) for item in datasets),
+        "dropoffs": sum(
+            len(item.dropoff_parcels)
+            for item in prepared.task_partition.datasets.values()
+        ),
+        "vehicles": sum(map(len, prepared.initial_vehicles.values())),
+    }
 
 
 class AlgorithmRegistry:
@@ -281,6 +298,7 @@ def run_episode(
     method: str,
     on_batch: Callable[[Mapping[str, int | float]], None] | None = None,
     manage_session: bool = True,
+    stage_reporter: StageReporter | None = None,
 ) -> tuple[dict[str, object], AlgorithmSession]:
     """Drive one isolated scenario through the shared physical-frame loop."""
     runtime_network = prepared.road_network.fork_runtime()
@@ -291,9 +309,15 @@ def run_episode(
     )
     try:
         session = factory(config, isolated, seed)
-        environment = Environment.from_prepared(
-            config=config, prepared=isolated, **session.environment_kwargs()
-        )
+        with (
+            stage_reporter.stage("environment_build")
+            if stage_reporter is not None
+            else nullcontext({})
+        ) as stage_result:
+            environment = Environment.from_prepared(
+                config=config, prepared=isolated, **session.environment_kwargs()
+            )
+            stage_result.update(prepared_stage_details(isolated))
         try:
             observations = environment.reset(seed)
             frame_session = session if isinstance(session, FrameAwareSession) else None
@@ -394,6 +418,7 @@ class ExperimentRunner:
         tensorboard: bool = False,
         road_artifact_dir: Path | None = None,
         scenario_provider: ScenarioProvider | None = None,
+        terminal: TerminalProgress | None = None,
     ) -> dict[str, dict[str, object]]:
         if not methods or len(set(methods)) != len(methods):
             raise ValueError("methods must be a non-empty unique sequence")
@@ -404,10 +429,12 @@ class ExperimentRunner:
         output_dir.mkdir(parents=True, exist_ok=True)
         run_seed = config.master_seed if seed is None else seed
         summaries: dict[str, dict[str, object]] = {}
-        with TerminalProgress(enabled=show_progress) as terminal:
+        with (
+            TerminalProgress(enabled=show_progress) if terminal is None else nullcontext(terminal)
+        ) as display:
             with EventLog(output_dir / "events.jsonl") as prep_writer:
-                reporter = StageReporter(prep_writer.event, terminal)
-                with reporter.stage("scenario_prepare", split=split.value):
+                reporter = StageReporter(prep_writer.event, display, phase=f"compare/{split.value}")
+                with reporter.stage("scenario_prepare", split=split.value) as stage_result:
                     prepared = (
                         Environment.prepare_environment_split(
                             config,
@@ -418,15 +445,21 @@ class ExperimentRunner:
                         if scenario_provider is None
                         else scenario_provider(config, split)
                     )
+                    stage_result.update(prepared_stage_details(prepared))
             try:
                 for method in methods:
                     with ArtifactWriter(
                         output_dir / method, tensorboard=tensorboard
                     ) as writer:
-                        reporter = StageReporter(writer.event, terminal)
-                        with reporter.stage("algorithm_run", method=method):
+                        reporter = StageReporter(writer.event, display, phase=f"compare/{method}")
+                        with reporter.stage("algorithm_run", method=method) as stage_result:
                             summary = self._run_one(
-                                config, prepared, method, run_seed, writer, terminal
+                                config, prepared, method, run_seed, writer, display, reporter
+                            )
+                            stage_result.update(
+                                assigned=summary["assigned_pickups"],
+                                total=summary["total_pickups"],
+                                profit=summary["operating_profit"],
                             )
                         writer.finish(summary)
                         summaries[method] = summary
@@ -442,6 +475,7 @@ class ExperimentRunner:
         seed: int,
         writer: ArtifactWriter,
         terminal: TerminalProgress,
+        reporter: StageReporter,
     ) -> dict[str, object]:
         def report(record: Mapping[str, int | float]) -> None:
             writer.batch(record)
@@ -456,6 +490,7 @@ class ExperimentRunner:
             seed=seed,
             method=method,
             on_batch=report,
+            stage_reporter=reporter,
         )
         return summary
 

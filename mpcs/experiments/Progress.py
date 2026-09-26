@@ -18,16 +18,21 @@ class StageReporter:
         self,
         emit: Callable[[str, Mapping[str, object]], None],
         display: "TerminalProgress",
+        *,
+        phase: str | None = None,
     ) -> None:
         self._emit = emit
         self._display = display
+        self._phase = phase
 
     @contextmanager
     def stage(self, stage_id: str, **details: object) -> Iterator[dict[str, object]]:
         started = monotonic()
         result: dict[str, object] = {}
-        self._emit("stage", {"stage": stage_id, "status": "start", **details})
-        self._display.stage(stage_id, "start", details)
+        phase = {} if self._phase is None else {"phase": self._phase}
+        label = stage_id if self._phase is None else f"{self._phase}/{stage_id}"
+        self._emit("stage", {"stage": stage_id, "status": "start", **phase, **details})
+        self._display.stage(label, "start", details)
         try:
             yield result
         except BaseException as error:
@@ -36,21 +41,23 @@ class StageReporter:
                 "status": "fail",
                 "elapsed_s": monotonic() - started,
                 "error": type(error).__name__,
+                **phase,
                 **details,
                 **result,
             }
             self._emit("stage", payload)
-            self._display.stage(stage_id, "fail", payload)
+            self._display.stage(label, "fail", payload)
             raise
         payload = {
             "stage": stage_id,
             "status": "done",
             "elapsed_s": monotonic() - started,
+            **phase,
             **details,
             **result,
         }
         self._emit("stage", payload)
-        self._display.stage(stage_id, "done", payload)
+        self._display.stage(label, "done", payload)
 
 
 class TerminalProgress:
@@ -83,7 +90,7 @@ class TerminalProgress:
         status: str,
         details: Mapping[str, object] | None = None,
     ) -> None:
-        record = {"stage": stage_id, "status": status, **(details or {})}
+        record = {"status": status, **(details or {}), "stage": stage_id}
         if status == "start":
             self._stages.append(record)
         else:
@@ -118,7 +125,7 @@ class TerminalProgress:
 
     @staticmethod
     def _details(record: Mapping[str, object]) -> str:
-        ignored = {"stage", "status", "elapsed_s", "graph_audit", "grid_audit"}
+        ignored = {"stage", "status", "elapsed_s", "phase", "graph_audit", "grid_audit"}
         parts = []
         for key, value in record.items():
             if key in ignored:
@@ -136,7 +143,15 @@ class TerminalProgress:
         stages.add_column("State", width=8)
         stages.add_column("Result")
         stages.add_column("Time", justify="right", width=8)
-        for record in self._stages[-10:]:
+        current_phase = str(self._stages[-1]["stage"]).rsplit("/", 1)[0] if self._stages else ""
+        milestones = {"scenario_prepare", "training", "evaluation", "algorithm_run"}
+        visible = [
+            record
+            for record in self._stages
+            if str(record["stage"]).rsplit("/", 1)[0] == current_phase
+            or str(record["stage"]).rsplit("/", 1)[-1] in milestones
+        ]
+        for record in visible:
             elapsed = record.get("elapsed_s")
             stages.add_row(
                 str(record["stage"]),
