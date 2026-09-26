@@ -33,7 +33,9 @@ Preparation adapters produce an immutable scenario with a road network, task par
 
 External data adapters provide domain parcels and vehicle snapshots to `prepare_scenario`. That module constructs partition and source records internally. Built-in parcel-v2 and synthetic preparation retain their format-specific validation.
 
-PPO training consumes physical-frame observations and settlement rewards. Its state encoder and training adapter preserve sequential parcel decisions, legal-action masks, a single recorded reward per physical frame, and rollout updates. Each episode selects one platform for learning; other platform policies act with frozen weights. A checkpoint supplies a frozen PPO session to the common experiment runner through the optional frame hooks. Training and comparison use the same physical-frame driver.
+PPO training consumes physical-frame observations and settlement rewards. Its state encoder and training adapter preserve sequential parcel decisions, legal-action masks, a single recorded reward per physical frame, and rollout updates. Independent PPO training rotates the learning platform each episode; other PPO agents act with frozen weights. A checkpoint supplies a frozen PPO session to the common experiment runner through the optional frame hooks. Training and comparison use the same physical-frame driver.
+
+For a mixed experiment, one fixed platform owns the PPO agent and the other platforms provide baseline or registered decision policies. Each opponent retains its local matcher. The environment uses one shared cross-platform service and auctioneer because cross selection and settlement are global frame rules. The learner alone stores PPO rollout frames and checkpoint state; validation and test replay the same platform lineup with a deterministic learner.
 
 ## Performance and observability
 

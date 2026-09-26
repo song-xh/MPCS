@@ -1,46 +1,95 @@
 # Multi-Platform Crowdsourcing Simulator (MPCS)
 
-MPCS is a Python simulation framework for spatial crowdsourcing across multiple platforms. Its built-in domain is electric-vehicle parcel pickup and delivery. It supports shared scenarios, synchronous platform decisions, local assignment, cross-platform release and matching, route execution, settlement, and experiment reporting.
+MPCS 是多平台空间众包仿真环境，内置电动车包裹取送场景。环境在同一物理帧收集全部平台动作，再统一推进任务分配、跨平台匹配、路线、结算和指标。数据准备、算法和实验流程各有独立接口。
 
-The framework separates scenario preparation, simulation mechanics, algorithms, and experiment orchestration. Dataset adapters and algorithm implementations can be added without changing the simulation clock or result accounting. See [Architecture](docs/architecture.md) for the component contracts and naming rules.
+## 快速上手
 
-## Install and run
-
-Python 3.11 or later is required. From the repository root:
+需要 Python 3.11 或更高版本。在项目根目录运行：
 
 ```powershell
 python -m pip install -e ".[dev]"
-python -m mpcs pipeline --dataset synthetic --output output/first-experiment
-python -m mpcs algorithms
 python -m mpcs datasets
-python -m mpcs run --dataset synthetic --methods localsum rl-capa --output output/example
-python -m mpcs train-ppo --dataset synthetic --output output/ppo --tensorboard
-python -m mpcs run --dataset synthetic --methods localsum ppo `
-  --ppo-checkpoint output/ppo/checkpoints/episode-000002.pt --output output/ppo-compare
+python -m mpcs algorithms
+python -m mpcs mixed --scenario examples/mixed-four-platform.json `
+  --output output/first-mixed --no-progress
 ```
 
-`pipeline` trains PPO, evaluates it on validation, and compares it with all five baselines on the test split. The synthetic preset needs no external files. A process-based comparison over several seeds uses the same scenario and metric contracts:
+根目录的 `setup.py` 是安装兼容入口；依赖、包发现和 `mpcs` 命令由 `pyproject.toml` 管理。synthetic 场景不需要外部数据。完成后查看 `output/first-mixed/summary.json`、`training/episodes.csv`、`validation/summary.json` 和 `comparison/mixed/metrics.png`。
+
+## 配置四平台混合训练
+
+这条命令让 P1 独自学习 PPO，P2/P3/P4 分别运行 RL-CAPA、MRA、IMPGTA 的本地策略：
 
 ```powershell
-python -m mpcs sweep --dataset synthetic --methods localsum mra fed-ltd `
-  --seeds 11 29 --max-workers 2 --output output/comparison
+python -m mpcs mixed --dataset synthetic --platforms 4 --learner P1 `
+  --platform-policy P2=rl-capa --platform-policy P3=mra `
+  --platform-policy P4=impgta --episodes 20 --seed 11 `
+  --output output/my-mixed --tensorboard
 ```
 
-Use `--tensorboard` to write scalar events under each run's `tensorboard/` directory. `--no-progress` disables terminal output; JSONL events and metrics are still recorded. PPO trains one platform at a time, rotating platforms by episode. The default episode count is at least the number of platforms. Pass `--episodes` to choose a longer run and `--device cuda` when a working CUDA installation is available.
+[场景 JSON 示例](examples/mixed-four-platform.json)保存了相同阵容，可通过 `--scenario` 重复运行。命令行的学习者、平台策略、平台数、轮数、种子和数据集覆盖 JSON 中的对应值。每个非学习平台都要指定策略。synthetic 支持 `--platforms 2` 到 `--platforms 16`；真实数据集的平台数由预设或完整配置决定。训练每轮仅更新指定 PPO 平台；验证和测试沿用相同阵容，PPO 使用确定性推理。
 
-## Data
+混合场景统一使用 PPO 现有跨平台服务和 PaperAuctioneer。MRA、IMPGTA 等 baseline 在混合场景中提供各自的**本地决策和匹配规则**；单独运行 baseline 时仍使用各自完整机制。混合指标代表整场阵容，`profit_by_platform` 给出各平台收益。
 
-Local datasets and road maps live under `dataset/`. The Chengdu, Shanghai, and New York source data from the original project have been copied into this workspace. They are excluded from Git, as are local tests and generated results. A fresh clone runs the synthetic preset immediately; real-data runs require the corresponding local files. `chengdu` supports the copied Chengdu parcel-v2 data. `shanghai` and `shanghai16` use the copied LaDe parcel-v2 test data and Shanghai road graph. The New York road graph is available for a custom scenario provider.
+## 接入自己的算法
+
+只选择 `LOCAL`、`WAIT`、`RELEASE` 的算法实现一个决策函数，返回当前平台每个待处理任务的动作。MPCS 提供本地匹配器和跨平台服务。可运行的插件见 [examples/custom_policy.py](examples/custom_policy.py)：
+
+```python
+from mpcs.core.Domain import ParcelAction
+
+def local_first(config, platform_id, observation):
+    return {
+        pickup.parcel_id: ParcelAction.LOCAL
+        for pickup in observation.waiting_pickups
+    }
+
+def register(runner):
+    runner.register_policy("local-first", local_first)
+```
+
+从项目根目录加载插件，并把它放入 P4：
 
 ```powershell
-python -m mpcs run --dataset chengdu --split test --methods localsum mra --output output/chengdu
-python -m mpcs run --dataset shanghai --split test --methods localsum --output output/shanghai
+python -m mpcs mixed --scenario examples/mixed-four-platform.json `
+  --plugin examples.custom_policy --platform-policy P4=local-first `
+  --output output/custom-policy
 ```
 
-For a complete typed configuration, pass `--config path/to/config.json` in place of `--dataset`. See [Adding algorithms and datasets](docs/extending.md) for the Python interfaces.
+同一个插件也可用 `run --methods local-first localsum` 单独比较。需要自定义路线匹配或拍卖机制时，用 `runner.register_algorithm(name, factory)` 实现完整 `AlgorithmSession`；它可用于独立比较。决策函数插件可直接成为混合训练中的对手平台。接口示例见 [扩展指南](docs/extending.md)。
 
-An importable Python module can register a new dataset or algorithm with the same runner. Pass it as `--plugin module_name` to `pipeline`, `run`, `train-ppo`, or `sweep`. The module exposes `register(runner)`; the runner offers `register_dataset`, `register_policy`, and `register_algorithm`. See [Adding algorithms and datasets](docs/extending.md) for an example.
+## 数据集和其他运行方式
 
-## Algorithms and results
+内置预设：`synthetic`、`chengdu`、`shanghai`、`shanghai16`。原项目的 Chengdu、Shanghai、New York 数据和地图已复制到本地 `dataset/`，不提交 Git。Chengdu 支持本地 parcel-v2 数据；内置 Shanghai 预设只有测试任务，训练需自定义场景提供器。新克隆仓库可立即运行 synthetic。
 
-The built-in baseline implementations live separately under `mpcs/algorithms/baseline/`: `localsum`, `rl-capa`, `mra`, `impgta`, and `fed-ltd`. Independent PPO is trained with `train-ppo` or `pipeline`; a trained checkpoint registers as `ppo` for a common comparison run. A pipeline writes `training/`, `validation/`, `comparison/`, and root `summary.json`. Training writes `episodes.jsonl`, `episodes.csv`, `training.png`, and periodic checkpoints. A comparison writes `events.jsonl` for preparation and, for each method, `events.jsonl`, `progress.json`, `metrics.csv`, `metrics.png`, and `summary.json`. A sweep also writes aggregate `metrics.csv` and `summary.json` at its root. TensorBoard logs are optional.
+```powershell
+python -m mpcs run --dataset chengdu --split test `
+  --methods localsum mra --output output/chengdu
+python -m mpcs pipeline --dataset synthetic --episodes 20 --output output/all-methods
+python -m mpcs sweep --dataset synthetic --methods localsum mra `
+  --seeds 11 29 --max-workers 2 --output output/sweep
+```
+
+`run` 比较选定算法；`pipeline` 训练独立 PPO，并与五种 baseline 在测试集比较；`sweep` 并行比较多个种子；`train-ppo` 只训练独立 PPO，默认按轮次轮换学习平台。`--no-progress` 关闭终端进度显示，`--tensorboard` 生成 TensorBoard 事件，JSONL、CSV 和图表仍会输出。
+
+自定义数据格式用插件注册 `config_factory(output_dir)` 和 `scenario_provider(config, split)`。提供器解析数据与地图后调用 `mpcs.data.prepare_scenario`，传入路网、区域、站点、各平台任务和初始车辆。完整实验配置可用 `--config path/to/config.json` 指定；混合阵容 JSON 用 `--scenario` 指定。详见 [扩展指南](docs/extending.md)。
+
+## 项目架构
+
+| 模块 | 职责 |
+| --- | --- |
+| `mpcs/config.py` | 类型化实验配置、平台数、训练参数和路径 |
+| `mpcs/data/Adapters.py` | 内置数据准备和外部场景构建 |
+| `mpcs/core/Domain.py`、`Framework.py` | 观测与动作协议、全局状态、同步物理帧和结算 |
+| `mpcs/core/GraphUtils.py`、`TaskUtils.py` 等 | 路网、任务、路线及状态推进的共享功能 |
+| `mpcs/algorithms/baseline/` | 五种 baseline，各在独立文件中 |
+| `mpcs/algorithms/PPOTraining.py` | 独立与混合 PPO 训练、验证和检查点 |
+| `mpcs/experiments/Runner.py` | 算法注册、同场景比较和并行 sweep |
+| `mpcs/experiments/Workflow.py` | 数据集注册、训练流程和混合阵容 |
+| `mpcs/cli.py` | `mixed`、`pipeline`、`run`、`sweep` 等命令 |
+
+场景准备产生可复用初始状态；各算法在隔离的路网运行时副本中运行。算法提供动作和可选匹配服务，环境负责推进与结算。PPO 与 baseline 共用物理帧驱动和结果格式。模块边界见 [架构文档](docs/architecture.md)。
+
+## 输出和本地开发
+
+混合训练生成 `training/`、`validation/`、`comparison/mixed/` 和根目录 `summary.json`。训练包含 `episodes.jsonl`、`episodes.csv`、`training.png`、`checkpoints/`；比较包含事件日志、逐帧进度、CSV、图表和摘要。`dataset/`、`tests/`、`output/`、缓存和检查点由 `.gitignore` 排除。

@@ -127,3 +127,28 @@ python -m mpcs sweep --plugin my_experiment --dataset my-data `
 ```
 
 The module must be importable by the Python environment used to run MPCS. Process sweep workers import it by name, so registrations are rebuilt in each worker. `mpcs algorithms --plugin my_experiment` and `mpcs datasets --plugin my_experiment` list available names.
+
+## Fixed-learner mixed training
+
+`MPCSRunner.run_mixed` trains one PPO agent while each other platform uses a selected baseline or a `register_policy` decision function. The platform count is configurable for the synthetic preset. A registered real dataset or a complete `ExperimentConfig` supplies its own platform count.
+
+```python
+runner = MPCSRunner()
+runner.register_policy("my-policy", my_decisions)
+summary = runner.run_mixed(
+    dataset="synthetic",
+    platform_count=4,
+    learner_platform_id="P1",
+    opponents_by_platform={
+        "P2": "rl-capa",
+        "P3": "mra",
+        "P4": "my-policy",
+    },
+    episodes=20,
+    output_dir=output_dir,
+)
+```
+
+Every platform must have exactly one policy. The mixed session uses each baseline's local decision and matcher components, then applies one shared cross-platform service and PaperAuctioneer for the whole environment. A full `AlgorithmSession` can be compared independently through `ExperimentRunner`; mixed opponents are the five built-in baselines or policies registered with `register_policy`.
+
+For a reusable command-line scenario, see `examples/mixed-four-platform.json`. `python -m mpcs mixed --scenario examples/mixed-four-platform.json --output output/mixed` runs training, validation, and one mixed test comparison. CLI `--learner`, `--platform-policy PLATFORM=ALGORITHM`, `--platforms`, `--episodes`, and `--dataset` override their JSON counterparts. `--plugin` loads an importable module before resolving policy names.
