@@ -88,8 +88,19 @@ class MPCSRunner:
 
         output_dir = Path(output_dir)
         config, provider = self.resolve_dataset(dataset, output_dir=output_dir)
-        if provider is None and config.dataset.name.startswith("shanghai"):
+        if provider is None and config.dataset.name in {"shanghai", "shanghai16"}:
             raise ValueError("bundled Shanghai parcels are available for the test split")
+        selected_methods = (
+            (*builtin_algorithms().names, "ppo") if methods is None else tuple(methods)
+        )
+        if "ppo" in self.algorithms.names:
+            raise ValueError("pipeline reserves the ppo algorithm name for its checkpoint")
+        available_methods = (*self.algorithms.names, "ppo")
+        if not selected_methods or len(set(selected_methods)) != len(selected_methods):
+            raise ValueError("methods must be a non-empty unique sequence")
+        for method in selected_methods:
+            if method not in available_methods:
+                raise ValueError(f"unknown algorithm: {method}")
         episode_count = (
             max(config.training.total_episodes, len(config.platform_ids))
             if episodes is None else episodes
@@ -118,9 +129,6 @@ class MPCSRunner:
         )
         registry = self.algorithms.copy()
         registry.register("ppo", ppo_checkpoint_factory(checkpoint))
-        selected_methods = (
-            (*self.algorithms.names, "ppo") if methods is None else tuple(methods)
-        )
         comparison = ExperimentRunner(registry).run(
             config,
             methods=selected_methods,
