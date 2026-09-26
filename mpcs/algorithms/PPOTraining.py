@@ -14,9 +14,7 @@ import torch
 
 from mpcs.algorithms.PPO import PrivatePPOAgent
 from mpcs.algorithms.PPOState import ConfiguredLocalObservationEncoder, _insertion_priority
-from mpcs.algorithms.baseline import build_baseline_components
 from mpcs.config import DatasetSplit, ExperimentConfig
-from mpcs.core.AuctionUtils import PaperAuctioneer
 from mpcs.core.Domain import (
     LocalAssignmentProposal,
     ParcelAction,
@@ -34,8 +32,10 @@ from mpcs.experiments.Progress import TerminalProgress
 from mpcs.experiments.Runner import (
     AlgorithmRegistry,
     AlgorithmSession,
+    CrossMechanismFactory,
     ScenarioProvider,
     builtin_algorithms,
+    builtin_cross_mechanisms,
     run_episode,
 )
 
@@ -88,12 +88,17 @@ class PPOPolicySession:
         *,
         seed: int,
         explore: bool,
+        cross_mechanism_factory: CrossMechanismFactory | None = None,
     ) -> None:
         self.config = config
         self.agents = agents
         self.explore = explore
-        cross = build_baseline_components("localsum", config, prepared, random_seed=seed)
-        self._cross_kwargs = cross.environment_kwargs()
+        cross_factory = (
+            builtin_cross_mechanisms()["paper"]
+            if cross_mechanism_factory is None
+            else cross_mechanism_factory
+        )
+        self._cross_kwargs = dict(cross_factory(config, prepared, seed))
         self._matchers = {
             platform_id: _PPOLocalMatcher(platform_id) for platform_id in agents
         }
@@ -112,7 +117,6 @@ class PPOPolicySession:
             platform_id: {} for platform_id in config.platform_ids
         }
         self._rewards = {platform_id: 0.0 for platform_id in config.platform_ids}
-        self._auctioneer = PaperAuctioneer(config=config.auction, tie_seed=seed)
         self._frame_private: dict[str, tuple[float, ...]] = {}
         self._frame_central: tuple[float, ...] = ()
 
@@ -120,7 +124,6 @@ class PPOPolicySession:
         return {
             **self._cross_kwargs,
             "local_matchers": self._matchers,
-            "auctioneer": self._auctioneer,
         }
 
     @property
@@ -354,8 +357,16 @@ class _MixedPolicySession(PPOPolicySession):
         *,
         seed: int,
         explore: bool,
+        cross_mechanism_factory: CrossMechanismFactory | None = None,
     ) -> None:
-        super().__init__(config, prepared, agents, seed=seed, explore=explore)
+        super().__init__(
+            config,
+            prepared,
+            agents,
+            seed=seed,
+            explore=explore,
+            cross_mechanism_factory=cross_mechanism_factory,
+        )
         self._opponents = opponents
         self._opponent_matchers = {
             platform_id: session.environment_kwargs()["local_matchers"][platform_id]
@@ -401,6 +412,7 @@ class PPOTrainer:
         learner_platform_id: str | None = None,
         opponents_by_platform: Mapping[str, str] | None = None,
         algorithm_registry: AlgorithmRegistry | None = None,
+        cross_mechanism_factory: CrossMechanismFactory | None = None,
     ) -> None:
         self.config = config
         self.learner_platform_id = learner_platform_id
@@ -408,6 +420,7 @@ class PPOTrainer:
         self.algorithm_registry = (
             builtin_algorithms() if algorithm_registry is None else algorithm_registry
         )
+        self.cross_mechanism_factory = cross_mechanism_factory
         if learner_platform_id is None:
             if self.opponents_by_platform:
                 raise ValueError("opponents require a fixed PPO learner")
@@ -556,7 +569,12 @@ class PPOTrainer:
     ) -> PPOPolicySession:
         if self.learner_platform_id is None:
             return PPOPolicySession(
-                self.config, prepared, self.agents, seed=seed, explore=explore
+                self.config,
+                prepared,
+                self.agents,
+                seed=seed,
+                explore=explore,
+                cross_mechanism_factory=self.cross_mechanism_factory,
             )
         opponents = {
             platform_id: self.algorithm_registry.create(
@@ -571,6 +589,7 @@ class PPOTrainer:
             opponents,
             seed=seed,
             explore=explore,
+            cross_mechanism_factory=self.cross_mechanism_factory,
         )
 
     def save_checkpoint(self, path: Path) -> None:
@@ -635,6 +654,7 @@ def mixed_checkpoint_factory(
     learner_platform_id: str,
     opponents_by_platform: Mapping[str, str],
     algorithm_registry: AlgorithmRegistry,
+    cross_mechanism_factory: CrossMechanismFactory | None = None,
 ):
     """Restore the learner while rebuilding the selected opponent policies."""
     checkpoint = Path(checkpoint)
@@ -645,6 +665,7 @@ def mixed_checkpoint_factory(
             learner_platform_id=learner_platform_id,
             opponents_by_platform=opponents_by_platform,
             algorithm_registry=algorithm_registry,
+            cross_mechanism_factory=cross_mechanism_factory,
         )
         trainer.load_checkpoint(checkpoint)
         return trainer.make_session(prepared, seed=seed, explore=False)

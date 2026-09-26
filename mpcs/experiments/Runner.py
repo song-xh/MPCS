@@ -16,6 +16,7 @@ from mpcs.algorithms.baseline import BaselineMethod, build_baseline_components
 from mpcs.algorithms.baseline.Greedy import build_neutral_greedy_context
 from mpcs.algorithms.baseline.Greedy import GreedyLocalMatcher
 from mpcs.config import DatasetSplit, ExperimentConfig
+from mpcs.core.AuctionUtils import PaperAuctioneer
 from mpcs.core.Domain import (
     JointStepResult,
     ParcelAction,
@@ -63,6 +64,9 @@ class FrameAwareSession(Protocol):
 AlgorithmFactory = Callable[
     [ExperimentConfig, PreparedEnvironment, int], AlgorithmSession
 ]
+CrossMechanismFactory = Callable[
+    [ExperimentConfig, PreparedEnvironment, int], Mapping[str, object]
+]
 ScenarioProvider = Callable[[ExperimentConfig, DatasetSplit], PreparedEnvironment]
 DecisionPolicy = Callable[
     [ExperimentConfig, str, PlatformObservation], Mapping[str, ParcelAction]
@@ -89,7 +93,11 @@ class AlgorithmRegistry:
         ) -> AlgorithmSession:
             return _DecisionPolicySession(config, prepared, seed, policy)
 
-        self.register(name, build)
+        self.register_local_algorithm(name, build)
+
+    def register_local_algorithm(self, name: str, factory: AlgorithmFactory) -> None:
+        """Register a session whose local decisions and matcher can be composed."""
+        self.register(name, factory)
         self._composable_names.add(name)
 
     def create(
@@ -200,9 +208,47 @@ def builtin_algorithms() -> AlgorithmRegistry:
         BaselineMethod.IMPGTA,
         BaselineMethod.FED_LTD,
     ):
-        registry.register(method.value, _baseline_factory(method))
-        registry._composable_names.add(method.value)
+        registry.register_local_algorithm(method.value, _baseline_factory(method))
     return registry
+
+
+def builtin_cross_mechanisms() -> dict[str, CrossMechanismFactory]:
+    """Return factories for complete global cross-platform mechanisms."""
+
+    def components(
+        method: str,
+        config: ExperimentConfig,
+        prepared: PreparedEnvironment,
+        seed: int,
+    ) -> dict[str, object]:
+        kwargs = build_baseline_components(
+            method, config, prepared, random_seed=seed
+        ).environment_kwargs()
+        kwargs.pop("local_matchers")
+        return kwargs
+
+    def paper(
+        config: ExperimentConfig, prepared: PreparedEnvironment, seed: int
+    ) -> Mapping[str, object]:
+        kwargs = components("localsum", config, prepared, seed)
+        kwargs["auctioneer"] = PaperAuctioneer(config=config.auction, tie_seed=seed)
+        return kwargs
+
+    def regional_fixed(
+        config: ExperimentConfig, prepared: PreparedEnvironment, seed: int
+    ) -> Mapping[str, object]:
+        return components("localsum", config, prepared, seed)
+
+    def pool_random(
+        config: ExperimentConfig, prepared: PreparedEnvironment, seed: int
+    ) -> Mapping[str, object]:
+        return components("mra", config, prepared, seed)
+
+    return {
+        "paper": paper,
+        "regional-fixed": regional_fixed,
+        "pool-random": pool_random,
+    }
 
 
 def _baseline_factory(method: BaselineMethod) -> AlgorithmFactory:

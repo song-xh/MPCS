@@ -13,10 +13,12 @@ from mpcs.config import DatasetSplit, ExperimentConfig
 from .Presets import BUILTIN_DATASETS, dataset_preset
 from .Runner import (
     AlgorithmFactory,
+    CrossMechanismFactory,
     DecisionPolicy,
     ExperimentRunner,
     ScenarioProvider,
     builtin_algorithms,
+    builtin_cross_mechanisms,
 )
 
 if TYPE_CHECKING:
@@ -31,6 +33,7 @@ class MPCSRunner:
 
     def __init__(self) -> None:
         self.algorithms = builtin_algorithms()
+        self._cross_mechanisms = builtin_cross_mechanisms()
         self._datasets: dict[str, tuple[DatasetFactory, ScenarioProvider]] = {}
 
     def register_dataset(
@@ -46,6 +49,25 @@ class MPCSRunner:
     def register_algorithm(self, name: str, factory: AlgorithmFactory) -> None:
         self.algorithms.register(name, factory)
 
+    def register_local_algorithm(self, name: str, factory: AlgorithmFactory) -> None:
+        """Register a session with local decisions and matchers for mixed runs."""
+        self.algorithms.register_local_algorithm(name, factory)
+
+    def register_cross_mechanism(
+        self, name: str, factory: CrossMechanismFactory
+    ) -> None:
+        """Register a factory returning the four cross Environment kwargs.
+
+        The factory receives ``(config, prepared, seed)`` and returns
+        ``release_sanitizers``, ``cross_bidders``, ``auctioneer``, and
+        ``serving_quality_provider``. Local matchers come from platform policies.
+        """
+        if not name or name in self._cross_mechanisms:
+            raise ValueError(
+                f"cross mechanism name is empty or already registered: {name!r}"
+            )
+        self._cross_mechanisms[name] = factory
+
     def register_policy(self, name: str, policy: DecisionPolicy) -> None:
         self.algorithms.register_policy(name, policy)
 
@@ -56,6 +78,10 @@ class MPCSRunner:
     @property
     def dataset_names(self) -> tuple[str, ...]:
         return (*BUILTIN_DATASETS, *self._datasets)
+
+    @property
+    def cross_mechanism_names(self) -> tuple[str, ...]:
+        return tuple(self._cross_mechanisms)
 
     def resolve_dataset(
         self,
@@ -144,6 +170,7 @@ class MPCSRunner:
         output_dir: Path,
         learner_platform_id: str,
         opponents_by_platform: Mapping[str, str],
+        cross_mechanism: str = "paper",
         platform_count: int | None = None,
         episodes: int | None = None,
         seed: int | None = None,
@@ -164,6 +191,10 @@ class MPCSRunner:
             raise ValueError("bundled Shanghai parcels are available for the test split")
         if "mixed" in self.algorithms.names:
             raise ValueError("mixed is reserved for the trained scenario")
+        try:
+            cross_factory = self._cross_mechanisms[cross_mechanism]
+        except KeyError as error:
+            raise ValueError(f"unknown cross mechanism: {cross_mechanism}") from error
         opponents = {}
         for platform_id, method in opponents_by_platform.items():
             if method not in self.algorithms.names:
@@ -178,6 +209,7 @@ class MPCSRunner:
             learner_platform_id=learner_platform_id,
             opponents_by_platform=opponents,
             algorithm_registry=self.algorithms,
+            cross_mechanism_factory=cross_factory,
         )
         return self._run_training(
             config=config,
@@ -188,7 +220,11 @@ class MPCSRunner:
             methods=("mixed",),
             trained_method="mixed",
             checkpoint_factory=lambda checkpoint: mixed_checkpoint_factory(
-                checkpoint, learner_platform_id, opponents, self.algorithms
+                checkpoint,
+                learner_platform_id,
+                opponents,
+                self.algorithms,
+                cross_factory,
             ),
             seed=seed,
             show_progress=show_progress,
@@ -197,6 +233,7 @@ class MPCSRunner:
             comparison_split=comparison_split,
             summary_fields={
                 "learner_platform_id": learner_platform_id,
+                "cross_mechanism": cross_mechanism,
                 "platform_policies": {
                     platform_id: (
                         "ppo" if platform_id == learner_platform_id else opponents[platform_id]
